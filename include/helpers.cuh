@@ -179,7 +179,7 @@ __device__ __forceinline__ float3 interpolateNormal(
 __device__ __forceinline__ float3 applyNormalMap(
     const Triangle& tri, const ShadeContext& sc, int materialID,
     const float3& apos, const float3& bpos, const float3& cpos,
-    float2 uv, float3 N, uint32_t instanceID)
+    float2 uv, float3 N, uint32_t instanceID, float lod = 0.0f)
 {
     const Material& mat = sc.materials[materialID];
     const int normalTex = mat.normalTex;
@@ -218,7 +218,7 @@ __device__ __forceinline__ float3 applyNormalMap(
     if (dot(Bo, B) < 0.0f) Bo = -Bo;
 
     // Linear-space map, [0,1] -> [-1,1]. glTF uses the +Y (OpenGL) convention.
-    float3 n = f3(sampleTex(sc.textures, normalTex, uv)) * 2.0f - f3(1.0f);
+    float3 n = f3(sampleTex(sc.textures, normalTex, uv, lod)) * 2.0f - f3(1.0f);
     n.x *= mat.normalScale; // glTF normalTexture.scale: strength on the tangent plane only
     n.y *= mat.normalScale;
 
@@ -330,6 +330,76 @@ __device__ __forceinline__ void getDataGeo(
     emission = f3(tri.emission);
 }
 
+// getDataGeo + ray-cone texture LOD. Every output matches getDataGeo exactly; it
+// additionally returns `lod`, the mip level to sample this hit's textures at, from
+// the baked per-triangle term (Triangle::lodDelta) and the propagated cone width.
+//
+// `coneWidth` is the cone radius AT this hit -- the caller grows it (coneWidth +=
+// spreadAngle * hitT) before calling. LOD = lodDelta + log2(coneWidth / |n.d|) +
+// RAYCONE_LOD_BIAS, clamped to >= 0, using the GEOMETRIC normal's tilt (the true
+// surface, pre-perturbation; abs() makes it valid before the backface flip). The
+// same lod feeds this function's own normal-map fetch so the perturbation matches.
+//
+// With USE_RAY_CONES == 0 (or in a TU that never included settings.cuh, e.g. the
+// software renderer) this compiles to lod = 0 -> mip 0, identical to getDataGeo.
+__device__ __forceinline__ void getDataGeoLOD(
+    const Triangle& tri,
+    ShadeContext shadeContext,
+    float2 barycentrics,
+    float3 inDirection,
+    float coneWidth,
+
+    int& materialID,
+    float2& uv,
+    float3& shadingPos,
+    float3& geoNormal,
+    float3& normal,
+    bool& backface,
+    float3& emission,
+    float& lod,
+
+    uint32_t instanceID = 0xFFFFFFFF
+) {
+    materialID = tri.materialID;
+    float u = barycentrics.x;
+    float v = barycentrics.y;
+
+    uv = interpolateUV(tri, shadeContext, u, v);
+
+    float3 apos = f3(__ldg(&shadeContext.vertices->positions[tri.aInd]));
+    float3 bpos = f3(__ldg(&shadeContext.vertices->positions[tri.bInd]));
+    float3 cpos = f3(__ldg(&shadeContext.vertices->positions[tri.cInd]));
+
+    shadingPos = (1.0f - u - v) * apos + u * bpos + v * cpos;
+
+    float3 gnObj = cross(bpos - apos, cpos - apos); // object-space geometric normal
+    normal = interpolateNormal(tri, shadeContext, u, v, apos, bpos, cpos);
+
+    if (instanceID != 0xFFFFFFFF) {
+        shadingPos = transformPosition(shadeContext.transformationMatrices, instanceID, shadingPos);
+        normal     = transformNormalRigid(shadeContext.transformationMatrices, instanceID, normal);
+        geoNormal  = transformNormalRigid(shadeContext.transformationMatrices, instanceID, gnObj);
+    } else {
+        geoNormal = normalize(gnObj);
+    }
+
+    if (dot(geoNormal, normal) < 0.0f) geoNormal = -geoNormal;
+
+#if USE_RAY_CONES
+    float ndd = fmaxf(fabsf(dot(geoNormal, inDirection)), 1e-3f);
+    lod = fmaxf(0.0f, tri.lodDelta + log2f(fmaxf(coneWidth, 1e-8f) / ndd) + RAYCONE_LOD_BIAS);
+#else
+    (void)coneWidth;
+    lod = 0.0f;
+#endif
+
+    normal = applyNormalMap(tri, shadeContext, materialID, apos, bpos, cpos, uv, normal, instanceID, lod);
+
+    backface = dot(normal, inDirection) > 0.0f;
+    if (backface) { normal = -normal; geoNormal = -geoNormal; }
+    emission = f3(tri.emission);
+}
+
 __device__ __forceinline__ void getDataWithoutInDirection(
     const Triangle& tri,
     ShadeContext shadeContext,
@@ -426,7 +496,8 @@ __device__ __forceinline__ void getDataWithoutInDirectionAndEmission(
     float3& normal,
     bool& backface,
 
-    uint32_t instanceID = 0xFFFFFFFF
+    uint32_t instanceID = 0xFFFFFFFF,
+    float lod = 0.0f
 ) {
     materialID = tri.materialID;
     float u = barycentrics.x;
@@ -450,7 +521,7 @@ __device__ __forceinline__ void getDataWithoutInDirectionAndEmission(
         normal = transformNormalRigid(shadeContext.transformationMatrices, instanceID, normal);
     }
 
-    normal = applyNormalMap(tri, shadeContext, materialID, apos, bpos, cpos, uv, normal, instanceID);
+    normal = applyNormalMap(tri, shadeContext, materialID, apos, bpos, cpos, uv, normal, instanceID, lod);
 
     float3 inDirection = normalize(shadingPos - origin);
     backface = dot(normal, inDirection) > 0.0f;

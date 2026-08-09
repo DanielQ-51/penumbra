@@ -1,6 +1,7 @@
 #include "integratorUtilities.cuh"
 #include "reflectors.cuh"
 #include "deviceCode.cuh"
+#include "configParser.cuh"
 #include <chrono>
 #include <iostream>
 #include "imageUtil.cuh"

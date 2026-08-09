@@ -61,9 +61,10 @@ struct RestirCommonParams {
     GBuffer prevGbuffer;
     Camera lastFrameCamera;
     uint8_t* __restrict__ duplication_map;
-    short2* reuseTextures[NUM_REUSE_TEXTURES]; 
-    uint32_t reuseTextureSizes[NUM_REUSE_TEXTURES]; 
+    short2* reuseTextures[NUM_REUSE_TEXTURES];
+    uint32_t reuseTextureSizes[NUM_REUSE_TEXTURES];
     ShiftResultBuffer shiftResultBuffer[NUM_REUSE_TEXTURES];
+    DenoiserGuides denoiserGuides;
 };
 
 struct CandidateGenParams {

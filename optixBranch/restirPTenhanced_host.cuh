@@ -31,6 +31,9 @@ __host__ void launch_restir (
     void* gb1Memory = allocateGBuffer(gbuffer1, commonParams.w * commonParams.h);
     void* gb2Memory = allocateGBuffer(gbuffer2, commonParams.w * commonParams.h);
 
+    DenoiserGuides denoiserGuides;
+    void* dgMemory = allocateDenoiserGuides(denoiserGuides, commonParams.w * commonParams.h);
+
     short2* reuseTexture1 = allocateReuseTexture(254, 16);
     short2* reuseTexture2 = allocateReuseTexture(230, 16);
     short2* reuseTexture3 = allocateReuseTexture(210, 16);
@@ -61,6 +64,7 @@ __host__ void launch_restir (
     restirParams.shiftResultBuffer[0] = shiftResultBuffer1;
     restirParams.shiftResultBuffer[1] = shiftResultBuffer2;
     restirParams.shiftResultBuffer[2] = shiftResultBuffer3;
+    restirParams.denoiserGuides = denoiserGuides;
 
     allParams.restir = restirParams;
 
@@ -81,6 +85,62 @@ __host__ void launch_restir (
     CUstream stream;
     cudaStreamCreate(&stream);
 
+#if USE_DENOISER == 1
+    // ---- OptiX TEMPORAL denoiser (albedo + geometric-normal guides + flow) ----
+    // NOTE: OptiX has drifted a couple of these fields across versions (e.g.
+    // denoiseAlpha lives in OptixDenoiserOptions on 8/9, and was in
+    // OptixDenoiserParams on 7.x). If a field errors, that's the culprit; flip
+    // USE_DENOISER to 0 to fall straight back to the raw path.
+    OptixDenoiser denoiser = nullptr;
+    {
+        OptixDenoiserOptions dopt = {};
+        dopt.guideAlbedo = 1;
+        dopt.guideNormal = 1;
+        optixDenoiserCreate(engineState.context, OPTIX_DENOISER_MODEL_KIND_TEMPORAL, &dopt, &denoiser);
+    }
+
+    OptixDenoiserSizes dsizes = {};
+    optixDenoiserComputeMemoryResources(denoiser, commonParams.w, commonParams.h, &dsizes);
+
+    CUdeviceptr d_denoiserState = 0, d_denoiserScratch = 0, d_hdrIntensity = 0;
+    cudaMalloc(reinterpret_cast<void**>(&d_denoiserState),   dsizes.stateSizeInBytes);
+    cudaMalloc(reinterpret_cast<void**>(&d_denoiserScratch), dsizes.withoutOverlapScratchSizeInBytes);
+    cudaMalloc(reinterpret_cast<void**>(&d_hdrIntensity),    sizeof(float));
+
+    optixDenoiserSetup(denoiser, stream,
+        commonParams.w, commonParams.h,
+        d_denoiserState,   dsizes.stateSizeInBytes,
+        d_denoiserScratch, dsizes.withoutOverlapScratchSizeInBytes);
+
+    // Ping-pong denoised outputs: this frame's output is next frame's previousOutput.
+    float4* d_denoiseOut  = nullptr;
+    float4* d_denoisePrev = nullptr;
+    cudaMalloc(&d_denoiseOut,  commonParams.w * commonParams.h * sizeof(float4));
+    cudaMalloc(&d_denoisePrev, commonParams.w * commonParams.h * sizeof(float4));
+
+    // Color/albedo/normal are tightly-packed float4; flow is tightly-packed float2.
+    auto makeDenoiserImage = [&](CUdeviceptr ptr) -> OptixImage2D {
+        OptixImage2D img = {};
+        img.data              = ptr;
+        img.width             = commonParams.w;
+        img.height            = commonParams.h;
+        img.rowStrideInBytes  = commonParams.w * sizeof(float4);
+        img.pixelStrideInBytes= sizeof(float4);
+        img.format            = OPTIX_PIXEL_FORMAT_FLOAT4;
+        return img;
+    };
+    auto makeFlowImage = [&](CUdeviceptr ptr) -> OptixImage2D {
+        OptixImage2D img = {};
+        img.data              = ptr;
+        img.width             = commonParams.w;
+        img.height            = commonParams.h;
+        img.rowStrideInBytes  = commonParams.w * sizeof(float2);
+        img.pixelStrideInBytes= sizeof(float2);
+        img.format            = OPTIX_PIXEL_FORMAT_FLOAT2;
+        return img;
+    };
+#endif
+
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
@@ -90,8 +150,25 @@ __host__ void launch_restir (
 #else
     //TurntableCameraAnimation animation = TurntableCameraAnimation(f3(0.0f, 0.0f, -1.5f), 6.5f, 0.66f, 90.0f, 0.0f);
 #endif
-    LinearCameraAnimation animation = LinearCameraAnimation(commonParams.camera.cameraOrigin, f3(commonParams.camera.xRot, commonParams.camera.yRot, commonParams.camera.zRot), f3(0.00f, 0.02f, 0.0f) ,f3());
-    //animation.update(allParams.common.camera, 0);
+    //LinearCameraAnimation animation = LinearCameraAnimation(commonParams.camera.cameraOrigin, f3(commonParams.camera.xRot, commonParams.camera.yRot, commonParams.camera.zRot), f3(0.00f, 0.02f, 0.0f) ,f3());
+    
+
+    float3 startOrigin = make_float3(commonParams.camera.cameraOrigin.x, 1.59222f, commonParams.camera.cameraOrigin.z);
+    float3 startRotation = make_float3(32.0f, commonParams.camera.yRot, commonParams.camera.zRot);
+
+    // Calculated per-frame deltas (for 1000 frames)
+    float3 posDelta = make_float3(0.00f, 0.0129624f, 0.00f);
+    float3 rotDelta = make_float3(-0.001118f, 0.00f, 0.00f);
+
+    
+    LinearCameraAnimation animation = LinearCameraAnimation(
+        startOrigin,
+        startRotation,
+        posDelta,
+        rotDelta
+    );
+
+    animation.update(allParams.common.camera, 0);
 
     dim3 blockSize(32, 8);  
     dim3 gridSize((commonParams.w+31)/32, (commonParams.h+7)/8);
@@ -157,6 +234,7 @@ __host__ void launch_restir (
         cudaMemsetAsync(r2Memory,  0, (size_t)numPix * RESERVOIR_SIZE, stream);
         cudaMemsetAsync(gb1Memory, 0, (size_t)numPix * GBUFFER_SIZE,   stream);
         cudaMemsetAsync(gb2Memory, 0, (size_t)numPix * GBUFFER_SIZE,   stream);
+        cudaMemsetAsync(dgMemory,  0, (size_t)numPix * DENOISER_GUIDES_SIZE, stream);
         allParams.restir.lastFrameCamera = allParams.common.camera;
     }
 
@@ -342,7 +420,41 @@ __host__ void launch_restir (
         );
 #endif
 
+#if USE_DENOISER == 1
+        // Denoise the reconstructed linear-HDR frame (d_finalOutput) before it goes
+        // to the host for tone-mapping/save. Guides are this frame's primary-hit
+        // albedo + geometric normal; color input is normalized linear HDR.
+        {
+            OptixImage2D colorIn = makeDenoiserImage(reinterpret_cast<CUdeviceptr>(d_finalOutput));
+
+            OptixDenoiserGuideLayer guideLayer = {};
+            guideLayer.albedo = makeDenoiserImage(reinterpret_cast<CUdeviceptr>(allParams.restir.denoiserGuides.albedo));
+            guideLayer.normal = makeDenoiserImage(reinterpret_cast<CUdeviceptr>(allParams.restir.denoiserGuides.normal));
+            guideLayer.flow   = makeFlowImage    (reinterpret_cast<CUdeviceptr>(allParams.restir.denoiserGuides.flow));
+
+            OptixDenoiserLayer layer = {};
+            layer.input          = colorIn;
+            layer.previousOutput = makeDenoiserImage(reinterpret_cast<CUdeviceptr>(d_denoisePrev));
+            layer.output         = makeDenoiserImage(reinterpret_cast<CUdeviceptr>(d_denoiseOut));
+
+            optixDenoiserComputeIntensity(denoiser, stream, &colorIn, d_hdrIntensity,
+                d_denoiserScratch, dsizes.withoutOverlapScratchSizeInBytes);
+
+            OptixDenoiserParams dprm = {};
+            dprm.hdrIntensity = d_hdrIntensity;
+            dprm.blendFactor  = 0.0f;
+            dprm.temporalModeUsePreviousLayers = (frame == 0) ? 0u : 1u; // no history on frame 0
+
+            optixDenoiserInvoke(denoiser, stream, &dprm,
+                d_denoiserState, dsizes.stateSizeInBytes,
+                &guideLayer, &layer, 1, 0, 0,
+                d_denoiserScratch, dsizes.withoutOverlapScratchSizeInBytes);
+        }
+        cudaMemcpyAsync(host_colors, d_denoiseOut, commonParams.w * commonParams.h * sizeof(float4), cudaMemcpyDeviceToHost, stream);
+        { float4* tmp = d_denoiseOut; d_denoiseOut = d_denoisePrev; d_denoisePrev = tmp; } // this frame's output -> next frame's history
+#else
         cudaMemcpyAsync(host_colors, d_finalOutput, commonParams.w * commonParams.h * sizeof(float4), cudaMemcpyDeviceToHost, stream);
+#endif
         cudaStreamSynchronize(stream);
 
         #pragma omp parallel for
@@ -357,7 +469,7 @@ __host__ void launch_restir (
     #if DEBUG_VISUALIZE_TYPE == 1
         ss << "renders/restirDebug/render" << std::setfill('0') << std::setw(4) << frame << ".bmp";
     #elif DEBUG_VISUALIZE_TYPE == 0
-        ss << "renders/restir/teapotver/render" << std::setfill('0') << std::setw(4) << frame << ".bmp";
+        ss << "renders/restir/sponza/rende" << std::setfill('0') << std::setw(4) << frame << ".bmp";
     #endif  
 #endif
 
@@ -379,7 +491,9 @@ __host__ void launch_restir (
         allParams.restir.gbuffer = tempGB;
 
         allParams.restir.lastFrameCamera = allParams.common.camera;
+#if CAMERA_MOVES != 0
         animation.update(allParams.common.camera, frame + 1);
+#endif
 
         /* 
         cudaMemsetAsync(allParams.restir.reservoir.F, 0, commonParams.w * commonParams.h * sizeof(float), stream);
@@ -421,8 +535,17 @@ __host__ void launch_restir (
 #endif
     cudaFree(r1Memory);
     cudaFree(r2Memory);
+#if USE_DENOISER == 1
+    optixDenoiserDestroy(denoiser);
+    cudaFree(reinterpret_cast<void*>(d_denoiserState));
+    cudaFree(reinterpret_cast<void*>(d_denoiserScratch));
+    cudaFree(reinterpret_cast<void*>(d_hdrIntensity));
+    cudaFree(d_denoiseOut);
+    cudaFree(d_denoisePrev);
+#endif
     cudaFree(gb1Memory);
     cudaFree(gb2Memory);
+    cudaFree(dgMemory);
     cudaFree(d_finalOutput);
     cudaFree(d_overlay);
     cudaFree(d_duplication_map);

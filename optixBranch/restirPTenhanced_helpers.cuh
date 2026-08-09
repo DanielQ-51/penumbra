@@ -1,10 +1,3 @@
-/**
- * CURRENTLY THIS IS WRITTEN TO ACCOMODATE A SINGLE LOBE ENGINE.
- * because calling f_eval_pdf sums the probabilities across all lobes,
- * while you are supposed to just do the sampling pdf as if you freshly sampled it
- */
-
-
 #pragma once
 #include <optix.h>
 #include <cuda_runtime.h>
@@ -59,6 +52,15 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         }
     }
 
+    // Ray-cone texture LOD state, reconstructed on the shifted domain exactly like
+    // candidate gen (deterministic in the replayed geometry, so the shifted path gets
+    // its own correct LOD). coneWidth = cone radius at the current origin; coneSpread =
+    // accumulated half-angle, seeded to the replaying camera's per-pixel angle.
+    float coneWidth = 0.0f;
+    float coneSpread;
+    if constexpr (!isReverseShift) coneSpread = 2.0f * params.camera.fovScale / (float)params.h;
+    else                           coneSpread = 2.0f * restir.lastFrameCamera.fovScale / (float)params.h;
+
     // handles all k=d bsdf cases except for environment hit with a non specular previous vertex
     // Note: a "full replay" is also done in NEE k=d paths, but its still handled in the other block since it shares the rc shadow ray logic
     if (rcVertexIndex == FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY) {
@@ -66,6 +68,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
         // these three may be unnecesary
         float lastPDF;
+        float lastPDF_marg; // marginal bsdf pdf, for the bsdf-vs-light MIS at the ending vertex
         bool prevDelta;
         float lastCosine;
 
@@ -94,13 +97,17 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         float3 geoNormal;
         float3 normal;
         float3 ImplicitEmission;
+        float lod;
         const Triangle& tri = params.shadeContext.scene[hitData.primId];
 
-        getDataGeo(
+        coneWidth += coneSpread * hitData.t; // grow cone across this segment, then bake LOD
+
+        getDataGeoLOD(
             tri,
             params.shadeContext,
             hitData.barycentrics,
             r.direction,
+            coneWidth,
 
             materialID,
             uv,
@@ -109,6 +116,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             normal,
             backface,
             ImplicitEmission,
+            lod,
 
             hitData.instanceId
         );
@@ -144,8 +152,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         float3 outgoing;
         float3 f_val_bsdf;
         float pdf_bsdf;
+        float pdf_bsdf_marg;
 
-        sample_f_eval(
+        sample_f_eval_lobe(
             localState,
             params.shadeContext.materials,
             materialID,
@@ -157,8 +166,10 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             outgoing,
             f_val_bsdf,
             pdf_bsdf,
+            pdf_bsdf_marg,
             uv,
-            TRANSPORTMODE_RADIANCE
+            TRANSPORTMODE_RADIANCE,
+            lod
         );
 
         if (pdf_bsdf < EPSILON && !K_is_D(type) && (pathLength != 2))
@@ -182,6 +193,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
         throughput *= f_val_bsdf * fabsf(outgoing.z) / pdf_bsdf;
         lastCosine = fabsf(outgoing.z);
+#if USE_RAY_CONES
+        coneSpread += RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
+#endif
         toWorld(outgoing, normal, outgoing);
 
         r.origin = shadingPos + (dot(outgoing, geoNormal) > 0.0f ? geoNormal : -geoNormal) * RAY_EPSILON;
@@ -189,6 +203,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
         prevDelta = currDelta;
         lastPDF = pdf_bsdf;
+        lastPDF_marg = pdf_bsdf_marg;
     }
         #if DEBUG_MODE == 1
         float3 lastPOS_GETRIDOFME = r.origin;
@@ -211,13 +226,17 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             float3 geoNormal;
             float3 normal;
             float3 lightEmission;
+            float lod;
             const Triangle& tri = params.shadeContext.scene[hitData.primId];
 
-            getDataGeo(
+            coneWidth += coneSpread * hitData.t; // grow cone across this segment, then bake LOD
+
+            getDataGeoLOD(
                 tri,
                 params.shadeContext,
                 hitData.barycentrics,
                 r.direction,
+                coneWidth,
 
                 materialID,
                 uv,
@@ -226,6 +245,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 normal,
                 backface,
                 lightEmission,
+                lod,
 
                 hitData.instanceId
             );
@@ -255,8 +275,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             float3 outgoing;
             float3 f_val_bsdf;
             float pdf_bsdf;
+            float pdf_bsdf_marg;
 
-            sample_f_eval(
+            sample_f_eval_lobe(
                 localState,
                 params.shadeContext.materials,
                 materialID,
@@ -268,8 +289,10 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 outgoing,
                 f_val_bsdf,
                 pdf_bsdf,
+                pdf_bsdf_marg,
                 uv,
-                TRANSPORTMODE_RADIANCE
+                TRANSPORTMODE_RADIANCE,
+                lod
             );
 
             lightEmission = backface ? f3(0.0f) : lightEmission;
@@ -328,7 +351,11 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
             prevDelta = currDelta;
             lastPDF = pdf_bsdf;
+            lastPDF_marg = pdf_bsdf_marg;
             lastCosine = fabsf(dot(outgoing, normal));
+#if USE_RAY_CONES
+            coneSpread += RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
+#endif
             #if DEBUG_MODE == 1
             lastPOS_GETRIDOFME = shadingPos;
             #endif
@@ -348,7 +375,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
             float pdf_sampleLight = params.shadeContext.lightSampler.evaluateEnvPdf(r.direction);
             float misWeight = (prevDelta) ? 1.0f : powerHeuristicTwoStrategy(
-                lastPDF, // primary strategy
+                lastPDF_marg, // primary strategy (marginal bsdf pdf for MIS)
                 pdf_sampleLight // alternate strategy
             );
 
@@ -380,22 +407,29 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         float2 uv;
         float3 shadingPos;
         bool backface;
+        float3 geoNormal;
         float3 normal;
         float3 lightEmission;
+        float lod;
         const Triangle& tri = params.shadeContext.scene[hitData.primId];
 
-        getData(
+        coneWidth += coneSpread * hitData.t; // final segment to the light vertex
+
+        getDataGeoLOD(
             tri,
             params.shadeContext,
             hitData.barycentrics,
             r.direction,
+            coneWidth,
 
             materialID,
             uv,
             shadingPos,
+            geoNormal,
             normal,
             backface,
             lightEmission,
+            lod,
 
             hitData.instanceId
         );
@@ -416,7 +450,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         if (luminance(lightEmission) > 0.0f) {
             float sampleLightPDF = params.shadeContext.lightSampler.evaluateMeshPdf(tri);
             float misWeight = (prevDelta) ? 1.0f : powerHeuristicTwoStrategy(
-                lastPDF, // primary strategy
+                lastPDF_marg, // primary strategy (marginal bsdf pdf for MIS)
                 (hitData.t * hitData.t * sampleLightPDF / (fabsf(incomingDirLocal.z))) // alternate strategy
             );
 
@@ -447,10 +481,19 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
         float3 lastPos;
         float3 lastNormal;
-        int lastMaterialID;
+
+        // for x_k-1 emissive flag, when reconstructing rng at x_k-1
+        uint32_t lastMaterialID_packedWithEmissiveFlag;
         float2 lastUV;
         bool lastBackface;
         float3 lastInDirLocal;
+
+        // Cone state captured AS OF x_{k-1}: coneWidth at x_{k-1}, the spread that will
+        // cross the x_{k-1}->x_k reconnection segment (includes x_{k-1}'s surface term),
+        // and x_{k-1}'s own texture LOD. Fed to the reconnection helpers.
+        float lastConeWidth  = 0.0f;
+        float lastConeSpread = 0.0f;
+        float lastLod        = 0.0f;
 
         float primaryFootprint;
     {
@@ -470,13 +513,17 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         float3 geoNormal;
         float3 normal;
         float3 ImplicitEmission;
+        float lod;
         const Triangle& tri = params.shadeContext.scene[hitData.primId];
 
-        getDataGeo(
+        coneWidth += coneSpread * hitData.t; // grow cone across this segment, then bake LOD
+
+        getDataGeoLOD(
             tri,
             params.shadeContext,
             hitData.barycentrics,
             r.direction,
+            coneWidth,
 
             materialID,
             uv,
@@ -485,6 +532,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             normal,
             backface,
             ImplicitEmission,
+            lod,
 
             hitData.instanceId
         );
@@ -502,17 +550,25 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         toLocal(r.direction, normal, incomingDirLocal);
 
         lastPos = shadingPos;
-        lastMaterialID = materialID;
+        lastMaterialID_packedWithEmissiveFlag = materialID;
         lastUV = uv;
         lastBackface = backface;
         lastInDirLocal = incomingDirLocal;
         lastNormal = normal;
+#if USE_RAY_CONES
+        lastConeWidth  = coneWidth;
+        lastConeSpread = coneSpread + RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
+        lastLod        = lod;
+#endif
 
         bool currDelta = params.shadeContext.materials[materialID].isSpecular;
 
         uint32_t loopBound = (K_is_D(type)) ? pathLength : rcVertexIndex;
 
         if (loopBound > 2) {
+            // emissive primary hit does not roll a reservoir. since x_k-1 emissive flag is for reconstructing the reservoir roll there,
+            // we thus dont need to store the emissive flag for primary hit
+
             if (!currDelta) {
                 // NEE cast takes 5 random numbers always. This wont get compiled out since it modifes the internal state
                 rand(&localState);
@@ -524,8 +580,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             float3 outgoing;
             float3 f_val_bsdf;
             float pdf_bsdf;
+            float pdf_bsdf_marg;
 
-            sample_f_eval(
+            sample_f_eval_lobe(
                 localState,
                 params.shadeContext.materials,
                 materialID,
@@ -537,8 +594,10 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 outgoing,
                 f_val_bsdf,
                 pdf_bsdf,
+                pdf_bsdf_marg,
                 uv,
-                TRANSPORTMODE_RADIANCE
+                TRANSPORTMODE_RADIANCE,
+                lod
             );
 
             if (pdf_bsdf < EPSILON)
@@ -564,6 +623,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 throughput *= f_val_bsdf * fabsf(outgoing.z) / pdf_bsdf;
             }
             lastCosine = fabsf(outgoing.z);
+#if USE_RAY_CONES
+            coneSpread += RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
+#endif
             toWorld(outgoing, normal, outgoing);
 
             r.origin = shadingPos + (dot(outgoing, geoNormal) > 0.0f ? geoNormal : -geoNormal) * RAY_EPSILON;
@@ -598,13 +660,17 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             float3 geoNormal;
             float3 normal;
             float3 lightEmission;
+            float lod;
             const Triangle& tri = params.shadeContext.scene[hitData.primId];
 
-            getDataGeo(
+            coneWidth += coneSpread * hitData.t; // grow cone across this segment, then bake LOD
+
+            getDataGeoLOD(
                 tri,
                 params.shadeContext,
                 hitData.barycentrics,
                 r.direction,
+                coneWidth,
 
                 materialID,
                 uv,
@@ -613,6 +679,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 normal,
                 backface,
                 lightEmission,
+                lod,
 
                 hitData.instanceId
             );
@@ -632,18 +699,33 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             // needed for recon
             if (depth + 1 == loopBound - 1) { // if this is the last iteration
                 lastPos = shadingPos;
-                lastMaterialID = materialID;
+                lastMaterialID_packedWithEmissiveFlag = materialID;
+                if (luminance(lightEmission) > 0.0f) {
+                    // sets the msb to 1 to flag x_k-1 is emissive
+                    lastMaterialID_packedWithEmissiveFlag = lastMaterialID_packedWithEmissiveFlag | 0x80000000;
+                }
+
                 lastUV = uv;
                 lastBackface = backface;
                 lastInDirLocal = incomingDirLocal;
                 lastNormal = normal;
+#if USE_RAY_CONES
+                lastConeWidth  = coneWidth;
+                lastConeSpread = coneSpread + RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
+                lastLod        = lod;
+#endif
+
+                // change: moved break to this block so that the rng state handed to the shift
+                // helpers is as of arriving to x_k-1
+                //break;
             }
 
             float3 outgoing;
             float3 f_val_bsdf;
             float pdf_bsdf;
+            float pdf_bsdf_marg;
 
-            sample_f_eval(
+            sample_f_eval_lobe(
                 localState,
                 params.shadeContext.materials,
                 materialID,
@@ -655,8 +737,10 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 outgoing,
                 f_val_bsdf,
                 pdf_bsdf,
+                pdf_bsdf_marg,
                 uv,
-                TRANSPORTMODE_RADIANCE
+                TRANSPORTMODE_RADIANCE,
+                lod
             );
 
             lightEmission = backface ? f3(0.0f) : lightEmission;
@@ -673,12 +757,16 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             if (fminf(forwardFootprint, inverseFootprint) >= primaryFootprint) {
                 isValid = false;
             }
-            //optixReorder(isValid ? 1 : 0, 1);
+            
             if (!isValid) {
                 if (IS_DEBUG_PIXEL(x, y)) {
                     DEBUG_PRINTF("SHIFT ABORT [%s]: recon failed dual footprint\n", isReverseShift ? "REVERSE" : "FORWARD");
                 }
                 return {false, f3(0), 0.0f, 0.0f};
+            }
+
+            if (depth + 1 == loopBound - 1) {
+                break;
             }
 
             if (!currDelta) {
@@ -687,10 +775,6 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 rand4(&localState);
 
                 rand(&localState); // for the reservoir roll
-            }
-
-            if (depth + 1 == loopBound - 1) {
-                break;
             }
 
             float lum = luminance(throughput);
@@ -703,10 +787,6 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 return {false, f3(0), 0.0f, 0.0f};
             }
             throughput /= p;
-
-            if (depth + 1 == loopBound - 1) {
-                break;
-            }
 
             if (pdf_bsdf < EPSILON)
             {
@@ -725,6 +805,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             prevDelta = currDelta;
             lastPDF = pdf_bsdf;
             lastCosine = fabsf(dot(outgoing, normal));
+#if USE_RAY_CONES
+            coneSpread += RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
+#endif
             #if DEBUG_MODE == 1
             lastPOS_GETRIDOFME = shadingPos;
             #endif
@@ -736,6 +819,14 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         bool rc_xk_backface;
         float3 rc_xk_normal;
 
+        // Ray-cone LOD at the reconnection vertex x_k, propagating the prefix cone
+        // (captured at x_{k-1}) across the reconnection segment. Computed from the
+        // GEOMETRIC rc position/normal (pre-normal-map) so it can also feed x_k's own
+        // normal-map fetch below -- keeping x_k's shading consistent with the forward
+        // pass. Only meaningful for a real surface rc vertex; env rc vertices
+        // (rcPrimID == 0xFFFFFFFF) are emission-only, so rc_lod stays 0 there.
+        float rc_lod = 0.0f;
+
         if (rcPrimID != 0xFFFFFFFF) {
             if (rcPrimID >= params.shadeContext.triNum) {
                 if (IS_DEBUG_PIXEL(x, y)) {
@@ -745,6 +836,26 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             }
 
             const Triangle& tri = params.shadeContext.scene[rcPrimID];
+
+#if USE_RAY_CONES
+            {
+                float ru = rcBarycentrics.x, rv = rcBarycentrics.y;
+                float3 ap = f3(__ldg(&params.shadeContext.vertices->positions[tri.aInd]));
+                float3 bp = f3(__ldg(&params.shadeContext.vertices->positions[tri.bInd]));
+                float3 cp = f3(__ldg(&params.shadeContext.vertices->positions[tri.cInd]));
+                float3 rcpos = (1.0f - ru - rv) * ap + ru * bp + rv * cp;
+                float3 gn    = cross(bp - ap, cp - ap); // geometric normal
+                if (rcInstanceID != 0xFFFFFFFF) {
+                    rcpos = transformPosition(params.shadeContext.transformationMatrices, rcInstanceID, rcpos);
+                    gn    = transformNormalRigid(params.shadeContext.transformationMatrices, rcInstanceID, gn);
+                }
+                float3 seg = rcpos - lastPos;
+                float dist = length(seg);
+                float coneWidth_xk = lastConeWidth + lastConeSpread * dist;
+                float ndd = fmaxf(fabsf(dot(normalize(gn), seg / fmaxf(dist, 1e-8f))), 1e-3f);
+                rc_lod = fmaxf(0.0f, tri.lodDelta + log2f(fmaxf(coneWidth_xk, 1e-8f) / ndd) + RAYCONE_LOD_BIAS);
+            }
+#endif
 
             getDataWithoutInDirectionAndEmission(
                 tri,
@@ -758,16 +869,19 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 rc_xk_normal,
                 rc_xk_backface,
 
-                rcInstanceID
+                rcInstanceID,
+                rc_lod
             );
         }
 
         if (K_less_D_minus_1(type)) {
             return perform_K_less_than_D_minus_1_reconnection(
                 params,
+                localState,
                 type,
                 x, y,
                 isReverseShift,
+                (loopBound == 2), // xkminus1IsPrimary (x_k-1 is the primary hit)
 
                 // x_k parameters (from the rcPrimID getData block)
                 rc_xk_materialID,           // rc_xk_materialID
@@ -776,8 +890,10 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 rc_xk_backface,             // rc_xk_backface
                 rc_xk_normal,               // rc_xk_normal
 
+                (lastMaterialID_packedWithEmissiveFlag & 0x80000000), // reinterpet the msb emissive flag as prevEmission
+
                 // x_{k-1} / y_{k-1} parameters (cached from the prefix loop)
-                lastMaterialID,           // xkminus1_materialID
+                (lastMaterialID_packedWithEmissiveFlag & 0x7FFFFFFF),           // xkminus1_materialID (remove msb)
                 lastUV,                   // xkminus1_uv
                 lastPos,                  // xkminus1_pos
                 lastBackface,             // xkminus1_backface
@@ -788,15 +904,20 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 throughput,               // throughput entering x_k-1
                 rcWi,                     // rcWi
                 rcRadiance,               // rcRadiance (contains suffix throughput)
-                jacobianDenom             // jacobian_denominator
+                jacobianDenom,            // jacobian_denominator
+
+                lastLod,                  // xkminus1_lod (prefix cone LOD at x_{k-1})
+                rc_lod                    // rc_lod (reconnection-segment LOD at x_k)
             );
         }
         else if (K_is_D_minus_1(type)) {
             return perform_K_is_D_minus_1_reconnection(
                 params,
+                localState,
                 type,
                 x, y,
                 isReverseShift,
+                (loopBound == 2), // xkminus1IsPrimary (x_k-1 is the primary hit)
 
                 // x_k parameters
                 rc_xk_materialID,           // rc_xk_materialID
@@ -805,8 +926,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 rc_xk_backface,             // rc_xk_backface
                 rc_xk_normal,               // rc_xk_normal
 
+                (lastMaterialID_packedWithEmissiveFlag & 0x80000000), // reinterpet the msb emissive flag as prevEmission
                 // x_{k-1} / y_{k-1} parameters
-                lastMaterialID,           // xkminus1_materialID
+                (lastMaterialID_packedWithEmissiveFlag & 0x7FFFFFFF),           // xkminus1_materialID (remove msb)
                 lastUV,                   // xkminus1_uv
                 lastPos,                  // xkminus1_pos
                 lastBackface,             // xkminus1_backface
@@ -818,15 +940,20 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 rcWi,
                 cached_nee,               // pdf_sampledLight_nee_sa
                 rcRadiance,               // lightEmissionRaw
-                jacobianDenom
+                jacobianDenom,
+
+                lastLod,                  // xkminus1_lod (prefix cone LOD at x_{k-1})
+                rc_lod                    // rc_lod (reconnection-segment LOD at x_k)
             );
         }
         else if (K_is_D(type)){ // K = D case
             return perform_K_is_D_reconnection(
                 params,
+                localState,
                 type,
                 x, y,
                 isReverseShift,
+                (loopBound == 2), // xkminus1IsPrimary (x_k-1 is the primary hit)
 
                 // x_k parameters
                 rc_xk_materialID,           // rc_xk_materialID
@@ -835,8 +962,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 rc_xk_backface,             // rc_xk_backface
                 rc_xk_normal,               // rc_xk_normal
 
+                (lastMaterialID_packedWithEmissiveFlag & 0x80000000), // reinterpet the msb emissive flag as prevEmission
                 // x_{k-1} / y_{k-1} parameters
-                lastMaterialID,           // xkminus1_materialID
+                (lastMaterialID_packedWithEmissiveFlag & 0x7FFFFFFF),           // xkminus1_materialID (remove msb)
                 lastUV,                   // xkminus1_uv
                 lastPos,                  // xkminus1_pos
                 lastBackface,             // xkminus1_backface
@@ -848,347 +976,15 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 rcWi,                     // xkminus1_to_xk_direction_normalized (for env hits)
                 cached_nee,               // pdf_sampledLight_nee
                 rcRadiance,               // lightEmissionRaw
-                jacobianDenom
+                jacobianDenom,
+
+                lastLod                   // xkminus1_lod (x_k is the light: emission only)
             );
         } else {
             DEBUG_PRINTF("Alert: invalid path type with respect to k vs d, type is: %u, with seed %u and path length %u\n", type, seed, pathLength);
             return {false, f3(0), 0.0f, 0.0f};
         }
     }
-/*
-        // Now, we should be at y_k-1. At this point, rng syncing with the prefix is not important
-        int materialID;
-        float2 uv;
-        float3 xk_pos;
-        bool backface;
-        float3 normal;
-        float3 emission;
-
-        if (rcPrimID != 0xFFFFFFFF) {
-            if (rcPrimID >= params.shadeContext.triNum) {
-                if (IS_DEBUG_PIXEL(x, y)) {
-                    DEBUG_PRINTF("SHIFT ABORT [%s]: recon wrongly initialized rcPrimID\n", isReverseShift ? "REVERSE" : "FORWARD");
-                }
-                return {false, f3(0), 0.0f, 0.0f};
-            }
-
-            const Triangle& tri = params.shadeContext.scene[rcPrimID];
-
-            getDataWithoutInDirection(
-                tri,
-                params.shadeContext,
-                rcBarycentrics,
-                lastPos,
-
-                materialID,
-                uv,
-                xk_pos,
-                normal,
-                backface,
-                emission,
-
-                hitData.instanceId
-            );
-        }
-
-        float3 new_payload_F = f3(0.0f);
-        float new_cached_jacobian = 0.0f;
-
-        float3 visibility_dir;
-        float visibility_dist;
-
-        float3 outDir;
-        if (is_internal_rc_vertex(type)) { // Checks if its either k<d-1 or k=d-1
-            outDir = xk_pos - lastPos;
-            visibility_dist = length(outDir);
-            outDir = normalize(outDir);
-            visibility_dir = outDir;
-        } else {
-            if (is_env(type)) {
-                outDir = rcWi;
-                visibility_dist = 1E30;
-                visibility_dir = outDir;
-            } else {
-                visibility_dist = length(xk_pos - lastPos);
-                outDir = normalize(xk_pos - lastPos);
-                visibility_dir = outDir;
-            }
-        }
-
-        if (dot(visibility_dir, normal) > 0.0f) {
-            normal = -normal;
-        }
-
-        if constexpr (!isReverseShift) {
-            if (IS_DEBUG_PIXEL(x, y)) {
-                DEBUG_DRAWLINE(params.overlay_buffer, params.camera, lastPos, lastPos + (visibility_dir * visibility_dist),
-                    f3(0.7f, 0.0f, 1.0f), 3
-                );
-            }
-        }
-
-
-
-
-        bool occluded = traceVisibility(
-            params,
-            Ray(lastPos + (visibility_dir * RAY_EPSILON), visibility_dir),
-            visibility_dist * (1.0f - EPSILON3)
-        );
-
-        ShiftResult result;
-        result.isValid = true;
-        result.contribution = f3(-1.0f);
-        result.jacobian = -1.0f;
-        result.new_cached_jacobian = -1.0f;
-        result.p_hat = -1.0f;
-
-        if (occluded) {
-            if (IS_DEBUG_PIXEL(x, y)) {
-                DEBUG_PRINTF("SHIFT ABORT [%s]: recon failed reconnection visibility test\n", isReverseShift ? "REVERSE" : "FORWARD");
-            }
-            return {false, f3(0), 0.0f, 0.0f};
-        } else if (is_internal_rc_vertex(type)) {
-
-            float connectionDistanceSQR = visibility_dist * visibility_dist;
-
-            float3 outDirLocal;
-            toLocal(outDir, lastNormal, outDirLocal);
-            float cosine_1 = fabsf(outDirLocal.z);
-            float3 f_val_1;
-            float pdf_1;
-
-            f_pdf_eval(
-                params.shadeContext.materials,
-                lastMaterialID,
-                params.shadeContext.textures,
-                lastInDirLocal, // direction to the y_k-1
-                outDirLocal, // direction to the rc vertex
-                1.5f, // change later when medium stack integrated
-                1.5f, // change later
-                f_val_1,
-                pdf_1,
-                lastUV
-            );
-
-            // the outgoing direction of the previous is the incoming direction for the current
-            float3 inDirLocal = toLocal(outDir, normal);
-
-            // points from the rc vertex to the next bsdf sampled direction (ie, the light for k=d-1)
-            outDirLocal = toLocal(rcWi, normal);
-            float cosine_2 = fabsf(outDirLocal.z);
-
-            float3 f_val_2;
-            float pdf_2;
-
-            f_pdf_eval(
-                params.shadeContext.materials,
-                materialID,
-                params.shadeContext.textures,
-                inDirLocal,
-                outDirLocal,
-                1.5f, // change later when medium stack integrated
-                1.5f, // change later
-                f_val_2,
-                pdf_2,
-                uv
-            );
-
-            float G = cosine_2 / (connectionDistanceSQR);
-
-            float p_new_suffix = pdf_1 * G;
-
-            if (!(K_is_D_minus_1(type) && is_nee(type))) {
-                p_new_suffix *= pdf_2;
-            }
-            new_cached_jacobian = p_new_suffix;
-
-            if (p_new_suffix <= 0.0f || jacobianDenom <= 0.0f) {
-                if (IS_DEBUG_PIXEL(x, y)) {
-                    DEBUG_PRINTF("SHIFT ABORT [%s]: internal recon zero p_new_suffix or jacobianDenom\n", isReverseShift ? "REVERSE" : "FORWARD");
-                }
-                return {false, f3(0), 0.0f, 0.0f};
-            }
-
-            float jacobian = p_new_suffix / jacobianDenom;
-
-            if (pdf_1 <= 0.0f) {
-                if (IS_DEBUG_PIXEL(x, y)) {
-                    DEBUG_PRINTF("SHIFT ABORT [%s]: internal recon pdf_1 zero\n", isReverseShift ? "REVERSE" : "FORWARD");
-                }
-                return {false, f3(0), 0.0f, 0.0f};
-            }
-            if (pdf_2 <= 0.0f && !(K_is_D_minus_1(type) && is_nee(type))) {
-                if (IS_DEBUG_PIXEL(x, y)) {
-                    DEBUG_PRINTF("SHIFT ABORT [%s]: internal recon pdf_2 zero\n", isReverseShift ? "REVERSE" : "FORWARD");
-                }
-                return {false, f3(0), 0.0f, 0.0f};
-            }
-
-            float3 throughput_arriving_at_xk = throughput * (f_val_1 * cosine_1 / pdf_1);
-
-            float lum_xk = luminance(throughput_arriving_at_xk);
-            float p_xk = clamp(lum_xk, 0.05f, 1.0f);
-
-            float rr_scale_xk = 1.0f;
-            if (!(K_is_D_minus_1(type))) { // for deep internal rc vertices, we need the rr scaling at x_k, but not for k=d-1
-                rr_scale_xk = 1.0f / p_xk; // This is the true RR scale for x_k
-            }
-
-
-            if (K_is_D_minus_1(type)) {
-                // Cached_nee is always in solid angle, if not k=d
-                float p_sampled_light = (is_nee(type)) ? cached_nee : pdf_2;
-
-                result.contribution = throughput_arriving_at_xk * rr_scale_xk
-                    * (f_val_2 * cosine_2 / p_sampled_light)
-                    * rcRadiance; // here rcRadiance is the raw emission
-            } else { // its a deep internal vertex
-                result.contribution = throughput_arriving_at_xk * rr_scale_xk
-                    * (f_val_2 * cosine_2 / pdf_2)
-                    * rcRadiance; // here rc radiance is the actual incoming radiance calculated with suffix throughput etc.
-            }
-
-
-            if (K_is_D_minus_1(type)) {
-                float misWeight = powerHeuristicTwoStrategy(
-                    (is_nee(type)) ? cached_nee : pdf_2,
-                    (is_nee(type)) ? pdf_2 : cached_nee
-                );
-
-                result.contribution *= misWeight;
-            }
-
-            result.p_hat = targetFunction(result.contribution);
-            result.jacobian = jacobian;
-            result.new_cached_jacobian = new_cached_jacobian;
-            if (result.p_hat <= 0.0f) {
-                if (IS_DEBUG_PIXEL(x, y)) {
-                    DEBUG_PRINTF("SHIFT ABORT [%s]: internal recon phat zero\n", isReverseShift ? "REVERSE" : "FORWARD");
-                }
-                return {false, f3(0), 0.0f, 0.0f};
-            }
-        } else { // K=D
-            if (is_env(type)) {
-                float3 outDirLocal;
-                toLocal(outDir, lastNormal, outDirLocal);
-                float cosine_surface = fabsf(outDirLocal.z);
-                float3 f_val_1;
-                float pdf_1;
-
-                f_pdf_eval(
-                    params.shadeContext.materials,
-                    lastMaterialID,
-                    params.shadeContext.textures,
-                    lastInDirLocal,
-                    outDirLocal,
-                    1.5f, // change later when medium stack integrated
-                    1.5f, // change later
-                    f_val_1,
-                    pdf_1,
-                    lastUV
-                );
-
-                float pathMISWeight = powerHeuristicTwoStrategy( // cached_nee should be the raw solid angle pdf
-                    (is_nee(type)) ? cached_nee : pdf_1,
-                    (is_nee(type)) ? pdf_1 : cached_nee
-                );
-
-                float p_sampled = (is_nee(type)) ? cached_nee : pdf_1;
-                if (p_sampled <= 0.0f || (!is_nee(type) && pdf_1 <= 0.0f)) {
-                    if (IS_DEBUG_PIXEL(x, y)) {
-                        DEBUG_PRINTF("SHIFT ABORT [%s]: k=d env recon p_sampled zero\n", isReverseShift ? "REVERSE" : "FORWARD");
-                    }
-                    return {false, f3(0), 0.0f, 0.0f};
-                }
-
-                result.contribution = pathMISWeight * (throughput * f_val_1 * cosine_surface * rcRadiance / p_sampled);
-
-                float jacobian;
-                if (is_bsdf(type)) { // Direction copy
-                    // jacobianDenom should just be a single pdf for direction copy
-                    if (jacobianDenom <= 0.0f || pdf_1 <= 0.0f) {
-                        if (IS_DEBUG_PIXEL(x, y)) {
-                            DEBUG_PRINTF("SHIFT ABORT [%s]: k=d env bsdf recon jacobian or pdf_1 zero\n", isReverseShift ? "REVERSE" : "FORWARD");
-                        }
-                        return {false, f3(0), 0.0f, 0.0f};
-                    }
-                    jacobian = pdf_1 / jacobianDenom;
-                    new_cached_jacobian = pdf_1;
-                } else {  // random replay takes care of the entire shift
-                    jacobian = 1.0f;
-                    new_cached_jacobian = 1.0f;
-                }
-                result.jacobian = jacobian;
-                result.new_cached_jacobian = new_cached_jacobian;
-
-                result.p_hat = targetFunction(result.contribution);
-
-                if (result.p_hat <= 0.0f) {
-                    if (IS_DEBUG_PIXEL(x, y)) {
-                        DEBUG_PRINTF("SHIFT ABORT [%s]: k=d env recon phat zero\n", isReverseShift ? "REVERSE" : "FORWARD");
-                    }
-                    return {false, f3(0), 0.0f, 0.0f};
-                }
-            } else { // MUST be NEE case, since k=d area light bsdf is a full replay version
-                float connectionDistanceSQR = lengthSquared(xk_pos - lastPos);
-
-                float3 outDirLocal;
-                toLocal(outDir, lastNormal, outDirLocal);
-                float cosine_surface = fabsf(outDirLocal.z);
-                float3 f_val_1;
-                float pdf_1;
-
-                f_pdf_eval(
-                    params.shadeContext.materials,
-                    lastMaterialID,
-                    params.shadeContext.textures,
-                    lastInDirLocal,
-                    outDirLocal,
-                    1.5f, // change later when medium stack integrated
-                    1.5f, // change later
-                    f_val_1,
-                    pdf_1,
-                    lastUV
-                );
-
-                float cosine_light = fabsf(dot(normal, outDir));
-
-                // if sampled light is area (not env), then perform area to solid angle conversion
-                float converted_cached_nee = cached_nee * (connectionDistanceSQR) / fabsf(cosine_light);
-
-                float p_sampled = converted_cached_nee;
-                if (p_sampled <= 0.0f) {
-                    if (IS_DEBUG_PIXEL(x, y)) {
-                        DEBUG_PRINTF("SHIFT ABORT [%s]: k=d nee recon p_sampled zero\n", isReverseShift ? "REVERSE" : "FORWARD");
-                    }
-                    return {false, f3(0), 0.0f, 0.0f};
-                }
-
-                float pathMISWeight = powerHeuristicTwoStrategy(
-                    converted_cached_nee,
-                    pdf_1
-                );
-
-                result.contribution = pathMISWeight * (throughput * f_val_1 * cosine_surface * rcRadiance / p_sampled);
-
-                result.p_hat = targetFunction(result.contribution);
-
-                if (result.p_hat <= 0.0f) {
-                    if (IS_DEBUG_PIXEL(x, y)) {
-                        DEBUG_PRINTF("SHIFT ABORT [%s]: k=d nee recon phat zero\n", isReverseShift ? "REVERSE" : "FORWARD");
-                    }
-                    return {false, f3(0), 0.0f, 0.0f};
-                }
-
-                result.jacobian = 1.0f;
-                result.new_cached_jacobian = 1.0f;
-            }
-        }
-
-        return result;
-    }
-    */
 }
 
 __device__ __forceinline__ bool isHistoryValid(const PipelineParams& params, int2 currentCoord, half2 motionVec, int2& out_coords) {

@@ -1,5 +1,6 @@
 #include <optix.h>
 #include <optix_device.h>
+#include "settings.cuh"      // first: defines USE_RAY_CONES etc. before helpers.cuh (via optixUtils) is pulled in
 #include "optixSetup.cuh"
 #include "optixStructs.cuh"
 #include "optixUtils.cuh"
@@ -8,7 +9,6 @@
 #include "reflectors.cuh"
 #include "helpers.cuh"
 #include "restirPTenhanced_helpers.cuh"
-#include "settings.cuh"
 
 
 extern "C" {
@@ -34,7 +34,8 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
 
     float3 throughput = f3(1.0f);
     float3 suffixThroughput = f3(1.0f);
-    float lastPDF;
+    float lastPDF;      // lobe-specific: for the cached Jacobian and footprints
+    float lastPDF_marg; // marginalized: for the bsdf-vs-light MIS weight at the next hit
     bool prevDelta;
     float lastCosine;
 
@@ -53,12 +54,20 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
     float neepdf = -1.0f;
 
     float primaryFootprint;
+
+    // Ray-cone texture LOD state (2 registers). coneWidth = cone radius at the current
+    // ray origin (world units); coneSpread = accumulated half-angle. Seeded to a
+    // zero-width cone whose spread is one pixel's angular size (2*tan(fov/2)/height).
+    float coneWidth  = 0.0f;
+    float coneSpread = 2.0f * params.camera.fovScale / (float)params.h;
+
     /**
      * Trace Primary Hit, special case
      */
 
 {
-    SurfaceHit hitData = traceClosest(params, r);
+    // to allow gbuffer to write coalesced, we defer SER for first bounce to the end
+    SurfaceHit hitData = traceClosestNoSER(params, r);
     if (!hitData.isHit)
     {
         float3 contribution = params.shadeContext.lightSampler.envMap.sampleDir(r.direction);
@@ -72,6 +81,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         restir.reservoir.setCachedJacobian(pixelIdx, -1.0f); // gate this out of shifts, like the empty-hit case
         restir.reservoir.setF(pixelIdx, 0u); // no reservoir here: zero contribution, not last-cycle stale radiance
         restir.gbuffer.setInvalidMotionVec(pixelIdx);
+        restir.denoiserGuides.setGuides(pixelIdx, f3(0.0f), f3(0.0f), f2(0.0f)); // env miss: no surface albedo/normal/flow
         save_rng(pixelIdx, &localState, nullptr);
         return;
     }
@@ -83,13 +93,18 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
     float3 geoNormal;
     float3 normal;
     float3 ImplicitEmission;
+    float lod;
     const Triangle& tri = params.shadeContext.scene[hitData.primId];
 
-    getDataGeo(
+    // Grow the cone across the primary segment (eye -> hit), then bake this hit's LOD.
+    coneWidth += coneSpread * hitData.t;
+
+    getDataGeoLOD(
         tri,
         params.shadeContext,
         hitData.barycentrics,
         r.direction,
+        coneWidth,
 
         materialID,
         uv,
@@ -98,6 +113,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         normal,
         backface,
         ImplicitEmission,
+        lod,
 
         hitData.instanceId
     );
@@ -113,7 +129,8 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         materialID,
         params.shadeContext.textures,
         uv,
-        albedo
+        albedo,
+        lod
     );
 
     restir.gbuffer.setGeometry(pixelIdx, normal, hitData.t, materialID, albedo);
@@ -121,10 +138,19 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
     float2 currPixelPos = make_float2((float)x + __half2float(jitter.x), (float)y + __half2float(jitter.y));
     float2 lastPixelPos;
 
+    // Temporal-denoiser flow, in pixels. Empirically OptiX wants (curr - prev) here
+    // (== our gbuffer MV); the (prev - curr) the docs suggest smears flat surfaces
+    // under motion. If ghosting reappears, flip this back to lastPixelPos-currPixelPos.
+    // Zero on frame 0 (no history; gated by temporalModeUsePreviousLayers).
+    float2 denoiserFlow = f2(0.0f);
     if (params.frame_index != 0) {
         restir.lastFrameCamera.worldToRaster(shadingPos, lastPixelPos);
         restir.gbuffer.setMotionVec(pixelIdx, currPixelPos - lastPixelPos); // validity is double checked in temporal phase
+        denoiserFlow = currPixelPos - lastPixelPos;
     }
+
+    // Still in the pre-SER (coalesced) write region, next to setGeometry.
+    restir.denoiserGuides.setGuides(pixelIdx, albedo, geoNormal, denoiserFlow); // geometric normal, full-precision albedo, flow
 
     primaryFootprint =
         (RECON_FOOTPRINT_C_CONSTANT / 100.0f) *
@@ -191,7 +217,8 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
                 1.5f, // change later when medium stack integrated
                 1.5f, // change later
                 bsdfPDF,
-                uv
+                uv,
+                lod
             );
 
             float3 f_val_nee;
@@ -204,7 +231,8 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
                 1.5f, // change later when medium stack integrated
                 1.5f, // change later
                 f_val_nee,
-                uv
+                uv,
+                TRANSPORTMODE_RADIANCE, lod
             );
 
             float3 contribution;
@@ -278,8 +306,9 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
     float3 outgoing;
     float3 f_val_bsdf;
     float pdf_bsdf;
+    float pdf_bsdf_marg;
 
-    sample_f_eval(
+    sample_f_eval_lobe(
         localState,
         params.shadeContext.materials,
         materialID,
@@ -291,8 +320,10 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         outgoing,
         f_val_bsdf,
         pdf_bsdf,
+        pdf_bsdf_marg,
         uv,
-        TRANSPORTMODE_RADIANCE
+        TRANSPORTMODE_RADIANCE,
+        lod
     );
 
     if (pdf_bsdf < EPSILON)
@@ -310,6 +341,13 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
 
     throughput *= f_val_bsdf * fabsf(outgoing.z) / pdf_bsdf;
     lastCosine = fabsf(outgoing.z);
+
+    // This surface's contribution to the cone spread for the NEXT segment (rougher
+    // surfaces defocus the cone faster; ~0 for mirrors, so specular stays sharp).
+#if USE_RAY_CONES
+    coneSpread += RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
+#endif
+
     toWorld(outgoing, normal, outgoing);
 
     r.origin = shadingPos + (dot(outgoing, geoNormal) > 0.0f ? geoNormal : -geoNormal) * RAY_EPSILON;
@@ -317,10 +355,15 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
 
     prevDelta = currDelta;
     lastPDF = pdf_bsdf;
+    lastPDF_marg = pdf_bsdf_marg;
     #if DEBUG_MODE == 1
     lastPOS_GETRIDOFME = shadingPos;
     #endif
 }
+    // reorder with empty flag: carries all alive threads to new homes while the returned threads
+    // are left behind
+    optixReorder(0u, 0u);
+
     for (int depth = 1; depth < params.max_depth; depth++)
     {
         SurfaceHit hitData = traceClosest(params, r);
@@ -329,7 +372,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
             float pdf_sampleLight = params.shadeContext.lightSampler.evaluateEnvPdf(r.direction);
             float3 envEmission = params.shadeContext.lightSampler.envMap.sampleDir(r.direction);
             float misWeight = (prevDelta) ? 1.0f : powerHeuristicTwoStrategy(
-                lastPDF, // primary strategy
+                lastPDF_marg, // primary strategy (marginal bsdf pdf: MIS cares about the physical ray)
                 pdf_sampleLight // alternate strategy
             );
 
@@ -398,12 +441,18 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         float3 geoNormal;
         float3 normal;
         float3 emission;
+        float lod;
         const Triangle& tri = params.shadeContext.scene[hitData.primId];
-        getDataGeo(
+
+        // Grow the cone across this segment (prev vertex -> this hit), then bake LOD.
+        coneWidth += coneSpread * hitData.t;
+
+        getDataGeoLOD(
             tri,
             params.shadeContext,
             hitData.barycentrics,
             r.direction,
+            coneWidth,
 
             materialID,
             uv,
@@ -412,6 +461,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
             normal,
             backface,
             emission,
+            lod,
 
             hitData.instanceId
         );
@@ -440,8 +490,9 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         float3 outgoing;
         float3 f_val_bsdf;
         float pdf_bsdf;
+        float pdf_bsdf_marg;
 
-        sample_f_eval(
+        sample_f_eval_lobe(
             localState,
             params.shadeContext.materials,
             materialID,
@@ -453,8 +504,10 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
             outgoing,
             f_val_bsdf,
             pdf_bsdf,
+            pdf_bsdf_marg,
             uv,
-            TRANSPORTMODE_RADIANCE
+            TRANSPORTMODE_RADIANCE,
+            lod
         );
 
         //---------------------------------------------------------------------------------------------------------------------------------------------------
@@ -490,7 +543,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         if (luminance(lightEmission) > EPSILON) {
             float sampleLightPDF = params.shadeContext.lightSampler.evaluateMeshPdf(tri);
             float misWeight = (prevDelta) ? 1.0f : powerHeuristicTwoStrategy(
-                lastPDF, // primary strategy
+                lastPDF_marg, // primary strategy (marginal bsdf pdf for MIS)
                 (hitData.t * hitData.t * sampleLightPDF / (fabsf(incomingDirLocal.z))) // alternate strategy
             );
 
@@ -590,7 +643,8 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
                     1.5f, // change later when medium stack integrated
                     1.5f, // change later
                     bsdfPDF,
-                    uv
+                    uv,
+                    lod
                 );
 
                 float3 f_val_nee;
@@ -603,7 +657,8 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
                     1.5f, // change later when medium stack integrated
                     1.5f, // change later
                     f_val_nee,
-                    uv
+                    uv,
+                    TRANSPORTMODE_RADIANCE, lod
                 );
 
                 float3 contributionSansThroughput;
@@ -719,7 +774,13 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
 
         prevDelta = currDelta;
         lastPDF = pdf_bsdf;
+        lastPDF_marg = pdf_bsdf_marg;
         lastCosine = fabsf(dot(outgoing, normal));
+
+        // This surface's contribution to the cone spread for the next segment.
+#if USE_RAY_CONES
+        coneSpread += RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
+#endif
         #if DEBUG_MODE == 1
         lastPOS_GETRIDOFME = shadingPos;
         #endif

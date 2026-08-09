@@ -8,6 +8,18 @@
 #include "textureView.cuh"
 #include <curand_kernel.h>
 
+// Compile-time switch for ReSTIR PT BSDF evaluation.
+//   1 = lobe-specific: sample_f_eval_lobe / f_pdf_eval_replayLobe do per-lobe work
+//       (what the shift's lobe replay needs).
+//   0 = marginalized only: both forward to the marginal sample_f_eval / f_pdf_eval,
+//       reproducing the pre-lobe behavior. The shift helpers' extra rng padding is
+//       left in place but is harmless (marginal eval ignores the rng state).
+// Lives here (not settings.cuh) because reflectors.cuh is shared with the software
+// renderer, which doesn't have optixBranch/settings.cuh on its include path.
+#ifndef LOBE_SPECIFIC_BSDF
+#define LOBE_SPECIFIC_BSDF 1
+#endif
+
 __device__ inline void cosine_f(const float3& baseColor, float3& newColor)
 {
     newColor = baseColor/PI;
@@ -944,16 +956,16 @@ __device__ inline void principled_sample_f_lobe(RNGState& localState, const floa
 // wi passed in is facing the surface, so we flip it normally. The shading uses wi as pointing away
 __device__ inline void f_eval(const Material* __restrict__ materials, int materialID, const TextureView& textures,
     const float3& wi, const float3& wo, float etaI, float etaT, float3& f_val, const float2 uv,
-    int transportMode = TRANSPORTMODE_RADIANCE)
+    int transportMode = TRANSPORTMODE_RADIANCE, float lod = 0.0f)
 {
     const Material& mat = materials[materialID];
     float3 albedo = f3(mat.albedo);
     if (mat.baseColorTex >= 0)
-        albedo = f3(sampleTex(textures, mat.baseColorTex, uv));
+        albedo = f3(sampleTex(textures, mat.baseColorTex, uv, lod));
 
     float trans = mat.transmission;
     if (mat.transTex >= 0)
-        trans = sampleTex(textures, mat.transTex, uv).x;
+        trans = sampleTex(textures, mat.transTex, uv, lod).x;
 
     if (mat.type == MAT_DIFFUSE)
     {
@@ -990,7 +1002,7 @@ __device__ inline void f_eval(const Material* __restrict__ materials, int materi
             float metallic = mat.metallic;
             float roughness = mat.roughness;
             if (mat.mrTex >= 0) {
-                float4 mr = sampleTex(textures, mat.mrTex, uv);
+                float4 mr = sampleTex(textures, mat.mrTex, uv, lod);
                 roughness *= mr.y; // glTF: roughness in G
                 metallic  *= mr.z; // glTF: metallic in B
             }
@@ -1003,16 +1015,16 @@ __device__ inline void f_eval(const Material* __restrict__ materials, int materi
 // wi passed in is facing the surface, so we flip it normally. The shading uses wi as pointing away
 __device__ inline void sample_f_eval(RNGState& localState, const Material* __restrict__ materials, int materialID, const TextureView& textures,
     const float3& wi, float etaI, float etaT, bool backface, float3& wo, float3& f_val, float& pdf, const float2 uv,
-    int transportMode = TRANSPORTMODE_RADIANCE)
+    int transportMode = TRANSPORTMODE_RADIANCE, float lod = 0.0f)
 {
     const Material& mat = materials[materialID];
     float3 albedo = f3(mat.albedo);
     if (mat.baseColorTex >= 0)
-        albedo = f3(sampleTex(textures, mat.baseColorTex, uv));
+        albedo = f3(sampleTex(textures, mat.baseColorTex, uv, lod));
 
     float trans = mat.transmission;
     if (mat.transTex >= 0)
-        trans = sampleTex(textures, mat.transTex, uv).x;
+        trans = sampleTex(textures, mat.transTex, uv, lod).x;
 
     if (mat.type == MAT_DIFFUSE)
     {
@@ -1057,7 +1069,7 @@ __device__ inline void sample_f_eval(RNGState& localState, const Material* __res
             float metallic = mat.metallic;
             float roughness = mat.roughness;
             if (mat.mrTex >= 0) {
-                float4 mr = sampleTex(textures, mat.mrTex, uv);
+                float4 mr = sampleTex(textures, mat.mrTex, uv, lod);
                 roughness *= mr.y;
                 metallic  *= mr.z;
             }
@@ -1069,12 +1081,12 @@ __device__ inline void sample_f_eval(RNGState& localState, const Material* __res
 // For dielectrics, when this function is called, we know whether or not it refracts, and that etaI and etaT are in fact correct
 // wi passed in is facing the surface, so we flip it normally. The shading uses wi as pointing away
 __device__ inline void pdf_eval(const Material* __restrict__ materials, int materialID, const TextureView& textures, const float3& wi, const float3& wo,
-    float etaI, float etaT, float& pdf, const float2 uv)
+    float etaI, float etaT, float& pdf, const float2 uv, float lod = 0.0f)
 {
     const Material& mat = materials[materialID];
     float trans = mat.transmission;
     if (mat.transTex >= 0)
-        trans = sampleTex(textures, mat.transTex, uv).x;
+        trans = sampleTex(textures, mat.transTex, uv, lod).x;
 
     if (mat.type == MAT_DIFFUSE)
     {
@@ -1110,11 +1122,11 @@ __device__ inline void pdf_eval(const Material* __restrict__ materials, int mate
         {
             float3 albedo = f3(mat.albedo);
             if (mat.baseColorTex >= 0)
-                albedo = f3(sampleTex(textures, mat.baseColorTex, uv));
+                albedo = f3(sampleTex(textures, mat.baseColorTex, uv, lod));
             float metallic = mat.metallic;
             float roughness = mat.roughness;
             if (mat.mrTex >= 0) {
-                float4 mr = sampleTex(textures, mat.mrTex, uv);
+                float4 mr = sampleTex(textures, mat.mrTex, uv, lod);
                 roughness *= mr.y;
                 metallic  *= mr.z;
             }
@@ -1124,16 +1136,16 @@ __device__ inline void pdf_eval(const Material* __restrict__ materials, int mate
 }
 __device__ inline void f_pdf_eval(const Material* __restrict__ materials, int materialID, const TextureView& textures,
     const float3& wi, const float3& wo, float etaI, float etaT, float3& f_val, float& pdf, const float2 uv,
-    int transportMode = TRANSPORTMODE_RADIANCE)
+    int transportMode = TRANSPORTMODE_RADIANCE, float lod = 0.0f)
 {
     const Material& mat = materials[materialID];
     float3 albedo = f3(mat.albedo);
     if (mat.baseColorTex >= 0)
-        albedo = f3(sampleTex(textures, mat.baseColorTex, uv));
+        albedo = f3(sampleTex(textures, mat.baseColorTex, uv, lod));
 
     float trans = mat.transmission;
     if (mat.transTex >= 0)
-        trans = sampleTex(textures, mat.transTex, uv).x;
+        trans = sampleTex(textures, mat.transTex, uv, lod).x;
 
     if (mat.type == MAT_DIFFUSE)
     {
@@ -1176,7 +1188,7 @@ __device__ inline void f_pdf_eval(const Material* __restrict__ materials, int ma
             float metallic = mat.metallic;
             float roughness = mat.roughness;
             if (mat.mrTex >= 0) {
-                float4 mr = sampleTex(textures, mat.mrTex, uv);
+                float4 mr = sampleTex(textures, mat.mrTex, uv, lod);
                 roughness *= mr.y;
                 metallic  *= mr.z;
             }
@@ -1204,17 +1216,24 @@ __device__ inline void f_pdf_eval(const Material* __restrict__ materials, int ma
 // principled opaque branch returns the sampled lobe's f and generation pdf (p_total)
 // instead of the blended f / marginal pdf. No lobe index escapes.
 __device__ inline void sample_f_eval_lobe(RNGState& localState, const Material* __restrict__ materials, int materialID, const TextureView& textures,
-    const float3& wi, float etaI, float etaT, bool backface, float3& wo, float3& f_val, float& pdf, const float2 uv,
-    int transportMode = TRANSPORTMODE_RADIANCE)
+    const float3& wi, float etaI, float etaT, bool backface, float3& wo, float3& f_val, float& pdf, float& pdf_marg, const float2 uv,
+    int transportMode = TRANSPORTMODE_RADIANCE, float lod = 0.0f)
 {
+    // pdf      = lobe-specific generation pdf (p_total) -> use for throughput and Jacobians.
+    // pdf_marg = fully marginalized bsdf pdf of `wo`    -> use STRICTLY for MIS weights.
+    // They are equal for every single-lobe material; they differ only for the
+    // multi-lobe principled BSDF, where the marginal is filled below.
+#if LOBE_SPECIFIC_BSDF
     const Material& mat = materials[materialID];
     float3 albedo = f3(mat.albedo);
     if (mat.baseColorTex >= 0)
-        albedo = f3(sampleTex(textures, mat.baseColorTex, uv));
+        albedo = f3(sampleTex(textures, mat.baseColorTex, uv, lod));
 
     float trans = mat.transmission;
     if (mat.transTex >= 0)
-        trans = sampleTex(textures, mat.transTex, uv).x;
+        trans = sampleTex(textures, mat.transTex, uv, lod).x;
+
+    pdf_marg = -1.0f; // <0 sentinel: overwritten only by the multi-lobe principled path
 
     if (mat.type == MAT_DIFFUSE)
     {
@@ -1255,13 +1274,20 @@ __device__ inline void sample_f_eval_lobe(RNGState& localState, const Material* 
             float metallic = mat.metallic;
             float roughness = mat.roughness;
             if (mat.mrTex >= 0) {
-                float4 mr = sampleTex(textures, mat.mrTex, uv);
+                float4 mr = sampleTex(textures, mat.mrTex, uv, lod);
                 roughness *= mr.y;
                 metallic  *= mr.z;
             }
             principled_sample_f_lobe(localState, albedo, metallic, roughness, -wi, wo, f_val, pdf);
+            principled_pdf(albedo, metallic, roughness, -wi, wo, pdf_marg); // marginal, for MIS only
         }
     }
+
+    if (pdf_marg < 0.0f) pdf_marg = pdf; // single-lobe materials: marginal == sampling pdf
+#else
+    sample_f_eval(localState, materials, materialID, textures, wi, etaI, etaT, backface, wo, f_val, pdf, uv, transportMode, lod);
+    pdf_marg = pdf;
+#endif
 }
 
 // Replay-and-evaluate for a reconnection endpoint. `wo` is fixed by the reconnection
@@ -1276,13 +1302,17 @@ __device__ inline void sample_f_eval_lobe(RNGState& localState, const Material* 
 // branch-dependent draw counts that need padding first); they fall back to marginal
 // evaluation WITHOUT advancing the stream, so they must not be used as endpoints yet.
 __device__ inline void f_pdf_eval_replayLobe(RNGState& localState, const Material* __restrict__ materials, int materialID, const TextureView& textures,
-    const float3& wi, const float3& wo, float etaI, float etaT, bool backface, float3& f_val, float& pdf, const float2 uv,
-    int transportMode = TRANSPORTMODE_RADIANCE)
+    const float3& wi, const float3& wo, float etaI, float etaT, bool backface, float3& f_val, float& pdf, float& pdf_marg, const float2 uv,
+    int transportMode = TRANSPORTMODE_RADIANCE, float lod = 0.0f)
 {
+    // pdf = lobe-specific p_total (throughput / Jacobian); pdf_marg = marginal (MIS only).
+#if LOBE_SPECIFIC_BSDF
     const Material& mat = materials[materialID];
     float3 albedo = f3(mat.albedo);
     if (mat.baseColorTex >= 0)
-        albedo = f3(sampleTex(textures, mat.baseColorTex, uv));
+        albedo = f3(sampleTex(textures, mat.baseColorTex, uv, lod));
+
+    pdf_marg = -1.0f; // <0 sentinel: overwritten only by the multi-lobe principled path
 
     if (mat.type == MAT_DIFFUSE)
     {
@@ -1301,7 +1331,7 @@ __device__ inline void f_pdf_eval_replayLobe(RNGState& localState, const Materia
         float metallic = mat.metallic;
         float roughness = mat.roughness;
         if (mat.mrTex >= 0) {
-            float4 mr = sampleTex(textures, mat.mrTex, uv);
+            float4 mr = sampleTex(textures, mat.mrTex, uv, lod);
             roughness *= mr.y;
             metallic  *= mr.z;
         }
@@ -1319,13 +1349,20 @@ __device__ inline void f_pdf_eval_replayLobe(RNGState& localState, const Materia
         float p_dir;
         principled_pdf_lobe(albedo, metallic, roughness, v, wo, lobe, p_dir);
         pdf = P_select * p_dir;
+        principled_pdf(albedo, metallic, roughness, v, wo, pdf_marg); // marginal, for MIS only
     }
     else
     {
         // Unsupported reconnection endpoint (delta / leaf / microfacet dielectric):
         // marginal fallback, no rng consumed. Not a valid endpoint yet -- see note above.
-        f_pdf_eval(materials, materialID, textures, wi, wo, etaI, etaT, f_val, pdf, uv, transportMode);
+        f_pdf_eval(materials, materialID, textures, wi, wo, etaI, etaT, f_val, pdf, uv, transportMode, lod);
     }
+
+    if (pdf_marg < 0.0f) pdf_marg = pdf; // single-lobe / fallback: marginal == pdf
+#else
+    f_pdf_eval(materials, materialID, textures, wi, wo, etaI, etaT, f_val, pdf, uv, transportMode, lod);
+    pdf_marg = pdf;
+#endif
 }
 
 
@@ -1335,12 +1372,13 @@ __device__ inline void getAlbedo(
     const TextureView& textures,
     const float2 uv,
 
-    float3& albedo
+    float3& albedo,
+    float lod = 0.0f
 ) {
     const Material& mat = materials[materialID];
     albedo = f3(mat.albedo);
     if (mat.baseColorTex >= 0)
-        albedo = f3(sampleTex(textures, mat.baseColorTex, uv));
+        albedo = f3(sampleTex(textures, mat.baseColorTex, uv, lod));
 
     if (mat.type == MAT_METAL) {
         float3 eta = f3(mat.eta);

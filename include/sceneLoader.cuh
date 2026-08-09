@@ -405,6 +405,13 @@ public:
             float4 emission = emissive ? make_float4(sm.emissive.x, sm.emissive.y, sm.emissive.z, 0.0f) : f4();
             int lightStart = (int)lightTris.size();
 
+            // Ray-cone LOD base term (Δ_tri = 0.5*log2(texelArea/worldArea)) is per
+            // triangle, but its texture dimensions are constant across the mesh. Baked
+            // from the base-color texture; skipped (Δ=0 -> mip 0) without UVs or a texture.
+            int  baseTex = (sm.materialID >= 0) ? materials[sm.materialID].baseColorTex : -1;
+            int2 texWH   = (baseTex >= 0) ? textures.dims(baseTex) : make_int2(0, 0);
+            bool bakeLOD = hasUV && baseTex >= 0 && texWH.x > 0 && texWH.y > 0;
+
             for (const uint3& t : sm.indices) {
                 int a = baseVert + (int)t.x, b = baseVert + (int)t.y, c = baseVert + (int)t.z;
                 int uva = hasUV ? baseUV + (int)t.x : -1;
@@ -415,12 +422,20 @@ public:
                 int myLightInd = emissive ? (int)lightTris.size() : -51;
 
                 int matID = sm.materialID;
-                // TEMPORARY TESTING REMOVE ASAP
-                if (emissive) {
-                    matID = 2;
-                }
 
                 Triangle tri(a, b, c, a, b, c, matID, uva, uvb, uvc, emission, myLightInd, myTriInd);
+
+                if (bakeLOD) {
+                    float3 p0 = f3(points[a]), p1 = f3(points[b]), p2 = f3(points[c]);
+                    float  pa = length(cross(p1 - p0, p2 - p0)); // world parallelogram area
+                    float2 t0 = sm.uvs[t.x], t1 = sm.uvs[t.y], t2 = sm.uvs[t.z];
+                    float  ta = fabsf((t1.x - t0.x) * (t2.y - t0.y) -
+                                      (t2.x - t0.x) * (t1.y - t0.y))   // UV parallelogram area
+                                * (float)texWH.x * (float)texWH.y;     // -> texel area
+                    if (pa > 1e-20f && ta > 1e-20f)
+                        tri.lodDelta = 0.5f * log2f(ta / pa);
+                }
+
                 tris.push_back(tri);
                 if (emissive) lightTris.push_back(tri);
             }

@@ -1,14 +1,16 @@
 Name: render
 
+width: 4096
+height:  1716
 width: 1920
 height: 1080
 
-Integrator: OPTIXNORMAL
 Integrator: RESTIRPT
+
 Sample Count: 1000
 Post Process: true
 
-Unidirectional Max Depth: 10
+Unidirectional Max Depth: 12
 BVH recommended leaf size: 2
 
 SAMPLE_ENVIRONMENT: false

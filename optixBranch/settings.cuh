@@ -17,7 +17,7 @@
 // under renders/unidirectional/. 0 = clean ReSTIR-only build (no PT code, no
 // per-frame timing overhead compiled in).
 #ifndef EQUAL_TIME_COMPARE
-#define EQUAL_TIME_COMPARE 1
+#define EQUAL_TIME_COMPARE 0
 #endif
 
 // Master switch for device side debug instrumentation.
@@ -27,11 +27,11 @@
 #endif
 
 #ifndef SAVE_SEQUENCE
-#define SAVE_SEQUENCE 1
+#define SAVE_SEQUENCE 0
 #endif
 
 #ifndef SAVE_FOR_VIDEO
-#define SAVE_FOR_VIDEO 1
+#define SAVE_FOR_VIDEO 0
 #endif
 
 #ifndef ACCUMULATE_FRAMES
@@ -58,6 +58,30 @@
 #define RECON_FOOTPRINT_C_CONSTANT 0.02f
 #endif
 
+// ---------------------------------------------------------------------------
+// Ray-cone texture LOD (mip selection for the ReSTIR PT integrator). The base
+// per-triangle term Delta is baked at load time (Triangle::lodDelta); at each
+// hit the LOD is  Delta + log2(coneWidth / |n.d|) + RAYCONE_LOD_BIAS.
+// ---------------------------------------------------------------------------
+
+// Master enable. 0 = every texture read stays at mip 0 (original behavior); the
+// cone registers still compile but getDataGeoLOD returns lod = 0.
+#ifndef USE_RAY_CONES
+#define USE_RAY_CONES 1
+#endif
+
+// Global mip bias. + = blurrier / cheaper / less texture aliasing; - = sharper
+// (and more aliasing). The single "overall aggressiveness" dial (like mipLodBias).
+#ifndef RAYCONE_LOD_BIAS
+#define RAYCONE_LOD_BIAS 0.0f
+#endif
+
+// How fast the cone widens per bounce, scaled by surface roughness. Larger =
+// secondary/GI bounces defocus onto coarser mips sooner (cheaper, less noise).
+#ifndef RAYCONE_ROUGHNESS_SPREAD
+#define RAYCONE_ROUGHNESS_SPREAD 0.20f
+#endif
+
 #ifndef DEBUG_TEST_PIXEL_X
 #define DEBUG_TEST_PIXEL_X 750
 #endif
@@ -76,6 +100,12 @@
 
 #ifndef USE_ENV_MAP
 #define USE_ENV_MAP 1
+#endif
+
+// Run the OptiX denoiser (HDR model, albedo + geometric-normal guides) on the
+// reconstructed linear-HDR frame before tone-mapping. 0 = save the raw noisy frame.
+#ifndef USE_DENOISER
+#define USE_DENOISER 1
 #endif
 
 #ifndef TEMPORAL_USE_DUAL_MV

@@ -20,6 +20,7 @@ class TextureManager {
 private:
     std::vector<cudaMipmappedArray_t> mipArrays;
     std::vector<cudaTextureObject_t>  texObjects;
+    std::vector<int2>                 texDims;   // level-0 (post-cap) width/height per texture
     cudaTextureObject_t* d_handles = nullptr;
     bool dirty = true;   // d_handles needs re-upload after the last add()
     int  maxDim_ = 2048; // cap on texture width/height (VRAM control); halved past this
@@ -76,6 +77,13 @@ public:
     TextureManager& operator=(const TextureManager&) = delete;
 
     int count() const { return (int)texObjects.size(); }
+
+    // Level-0 (post-cap) dimensions of a texture, for ray-cone LOD baking.
+    // Returns {0,0} for an out-of-range index.
+    int2 dims(int idx) const {
+        if (idx < 0 || idx >= (int)texDims.size()) return make_int2(0, 0);
+        return texDims[idx];
+    }
 
     // Cap texture resolution (width & height). Any larger image is box-filtered
     // down until it fits before upload. Set before loading textures.
@@ -143,6 +151,7 @@ public:
 
         mipArrays.push_back(mipArray);
         texObjects.push_back(obj);
+        texDims.push_back(make_int2(w, h)); // w,h are the final level-0 dims (post-cap)
         dirty = true;
         return (int)texObjects.size() - 1;
     }

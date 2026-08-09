@@ -22,6 +22,12 @@ using TechniqueType = uint32_t;
 #define GBUFFER_SIZE 20
 #endif
 
+// Per-pixel bytes for the OptiX denoiser guide arena: albedo (float4) + normal
+// (float4) + flow (float2, temporal motion vector).
+#ifndef DENOISER_GUIDES_SIZE
+#define DENOISER_GUIDES_SIZE 40
+#endif
+
 // Path Types
 
 #define SHIFT_IS_NEE           (1 << 0) // 0 = BSDF, 1 = NEE
@@ -594,6 +600,53 @@ __host__ inline void* allocateGBuffer(GBuffer& r, uint32_t numPixel) {
     r.albedos = reinterpret_cast<uint32_t*>(ptr); ptr += numPixel * sizeof(uint32_t);
     r.motionVector = reinterpret_cast<half2*>(ptr); ptr += numPixel * sizeof(half2);
     r.dualMotionVector = reinterpret_cast<half2*>(ptr); ptr += numPixel * sizeof(half2);
+
+    return raw;
+}
+
+// Guide buffers for the OptiX denoiser, written once per frame at the primary hit.
+// Deliberately separate from the GBuffer: the denoiser wants flat, full-precision
+// float4 guides, and specifically the GEOMETRIC normal (low frequency) rather than
+// the normal-mapped shading normal the GBuffer stores for ReSTIR reuse. The noisy
+// color input comes from CommonParams::accum_buffer; the temporal flow reuses
+// GBuffer::motionVector -- neither is duplicated here.
+struct DenoiserGuides {
+    float4* __restrict__ albedo; // primary-surface base color (albedo-demodulation guide)
+    float4* __restrict__ normal; // primary-surface GEOMETRIC normal (edge-stopping guide)
+    float2* __restrict__ flow;   // temporal motion vector, in pixels, OptiX convention:
+                                 // the vector FROM the current pixel TO its previous-frame
+                                 // position, i.e. (prevPixel - currPixel) = -(gbuffer MV).
+
+    __device__ __forceinline__ void setGuides(uint32_t idx, float3 alb, float3 geoNormal, float2 flowVec) const {
+        __stcs(&albedo[idx], make_float4(alb.x, alb.y, alb.z, 0.0f));
+        __stcs(&normal[idx], make_float4(geoNormal.x, geoNormal.y, geoNormal.z, 0.0f));
+        __stcs(&flow[idx], flowVec);
+    }
+
+    __device__ __forceinline__ float3 getAlbedo(uint32_t idx) const {
+        float4 a = __ldcs(&albedo[idx]);
+        return make_float3(a.x, a.y, a.z);
+    }
+
+    __device__ __forceinline__ float3 getNormal(uint32_t idx) const {
+        float4 n = __ldcs(&normal[idx]);
+        return make_float3(n.x, n.y, n.z);
+    }
+};
+
+// Same single-cudaMalloc arena pattern as allocateGBuffer: carve the field pointers
+// out of one block; free by cudaFree-ing the returned base. Single-buffered (the
+// temporal denoiser warps the previous OUTPUT, not the previous guides).
+__host__ inline void* allocateDenoiserGuides(DenoiserGuides& r, uint32_t numPixel) {
+    numPixel = (numPixel + 31) & ~31;
+
+    void* raw;
+    cudaMalloc(&raw, numPixel * DENOISER_GUIDES_SIZE);
+
+    char* ptr = static_cast<char*>(raw);
+    r.albedo = reinterpret_cast<float4*>(ptr); ptr += numPixel * sizeof(float4);
+    r.normal = reinterpret_cast<float4*>(ptr); ptr += numPixel * sizeof(float4);
+    r.flow   = reinterpret_cast<float2*>(ptr); ptr += numPixel * sizeof(float2);
 
     return raw;
 }

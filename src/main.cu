@@ -1,10 +1,3 @@
-/**
- * Dear reader. As you may notice, this file is quite messy. I swear there are better examples of code in this project, 
- * I recommend environment.cuh and sampling.cuh, as well as fastIntegrators.cu. Pleasre recognize that this project has 
- * spanned the majority of my time as a serious software developer, so a lot of the code was written very early on, and
- * I am constantly refactoring to make the engine more professional.
- */
-
 
 #include "deviceCode.cuh"
 #include "fastIntegrators.cuh"
@@ -21,6 +14,7 @@
 #include <iomanip>
 #include "imageUtil.cuh"
 #include "textureManager.cuh"
+#include "configParser.cuh"
 #include <fstream>
 #include <cuda_fp16.h>
 #include <string>

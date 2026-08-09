@@ -26,6 +26,7 @@
 #include <optix_stack_size.h>   // [STACK_FIX] needed for optixUtilComputeStackSizes / optixPipelineSetStackSize
 
 #include "sceneLoader.cuh"
+#include "configParser.cuh"
 
 #define ASSET_PATH(path) (std::string(ROOT_DIR) + "/" + path)
 
@@ -731,9 +732,11 @@ int initRender(OptixEngineState& engineState, string configPath, int renderNumbe
     // Computing BVH
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     SceneLoader loader = {};
-    loader.textures.setMaxDimension(1024);
+    loader.textures.setMaxDimension(2048);
     loader.setEmissiveScale(1.0f);
     loader.loadGLTF(ASSET_PATH("assets/gltf/main_sponza/NewSponza_Main_glTF_003.gltf"));
+    loader.loadGLTF(ASSET_PATH("assets/gltf/pkg_a_curtains/NewSponza_Curtains_glTF.gltf"));
+    //loader.loadGLTF(ASSET_PATH("assets/gltf/pkg_d_10k_candles/NewSponza_4_Combined_glTF.gltf"));
     //loader.loadGLTF(ASSET_PATH("assets/gltf/main_sponza/blendersponza/updatedsponza.gltf"));
 
     printPrincipledMaterials(loader);

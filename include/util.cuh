@@ -38,7 +38,7 @@ __device__ __constant__ float INVPI = 0.3183098f;
 
 
 __device__ __constant__ float SKY_RADIUS = 100.0f;
-__device__ __constant__ float MAX_FIREFLY_LUM = 30.0f;
+__device__ __constant__ float MAX_FIREFLY_LUM = 25.0f;
 __device__ __constant__ float MERGE_MAX_FIREFLY_LUM = 350.0f;
 __device__ __constant__ float MERGE_ROUGHNESS_BOUND = 0.0f;
 
@@ -478,26 +478,6 @@ __device__ __host__ inline float luminance(float4 c)
 __device__ __host__ inline float luminance(float3 c)
 {
     return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
-}
-
-__host__ inline std::string trim(const std::string& str) {
-    size_t first = str.find_first_not_of(" \t\r\n");
-    if (std::string::npos == first) return str;
-    size_t last = str.find_last_not_of(" \t\r\n");
-    return str.substr(first, (last - first + 1));
-}
-
-__host__ inline float3 parseVec3(const std::string& val) {
-    float3 v;
-    std::stringstream ss(val);
-    ss >> v.x >> v.y >> v.z;
-    return v;
-}
-
-__host__ inline bool parseBool(const std::string& val) {
-    std::string v = val;
-    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-    return (v == "true");
 }
 
 __device__ __forceinline__ uint32_t toRGB9E5(float3 c)
