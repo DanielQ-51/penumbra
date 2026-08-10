@@ -1194,7 +1194,7 @@ __device__ __forceinline__ float3 debugVisualizeTechnique(uint32_t type, uint32_
     // 0. Special Reconnection Indices -> Overriding Colors
     if (rcInd == 0xFF) {
         // Full Replay Technique: White
-        return make_float3(0.0f, 1.0f, 0.0f); 
+        return make_float3(1.0f, 1.0f, 1.0f); 
     } 
     else if (rcInd == 0xFE) {
         // Direction Copy: black/greu

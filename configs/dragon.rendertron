@@ -1,5 +1,10 @@
 Name: dragon
 
+MaterialsFile: configs/materials.rendertron
+
+EnvMap: assets/environment/lakeside_sunrise_2k.exr
+EnvMap Rotation: 130.0
+
 width: 2580
 height: 1080
 

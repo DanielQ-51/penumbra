@@ -1,9 +1,9 @@
 #pragma once
 
 #include "sceneContexts.cuh"
+#include "configParser.cuh"
 
-//__global__ void colorPixel (int w, int h, float4* colors);
-__host__ void updateConstants(RenderConfig& config);
+__host__ void updateConstants(const RenderConfig& config);
 
 __host__ void launch_unidirectional(
     int maxDepth, 

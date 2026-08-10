@@ -38,7 +38,7 @@ __device__ __constant__ float INVPI = 0.3183098f;
 
 
 __device__ __constant__ float SKY_RADIUS = 100.0f;
-__device__ __constant__ float MAX_FIREFLY_LUM = 25.0f;
+__device__ __constant__ float MAX_FIREFLY_LUM = 10.0f;
 __device__ __constant__ float MERGE_MAX_FIREFLY_LUM = 350.0f;
 __device__ __constant__ float MERGE_ROUGHNESS_BOUND = 0.0f;
 

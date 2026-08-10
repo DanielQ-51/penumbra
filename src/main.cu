@@ -15,6 +15,7 @@
 #include "imageUtil.cuh"
 #include "textureManager.cuh"
 #include "configParser.cuh"
+#include "sceneLoader.cuh"
 #include <fstream>
 #include <cuda_fp16.h>
 #include <string>
@@ -167,197 +168,57 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
     cudaMemset(out_overlay, 0, w * h * sizeof(float4));
 
     Vertices vertices;
-    vector<float4> points;
-    vector<float4> normals;
-    vector<float4> colors; // unused now
-    vector<float2> uvs;
-    vector<Triangle> mesh;
-    vector<Triangle> lightsvec;
     vector<BVHnode> bvhvec;
 
     vector<float4> centroids;
     vector<float4> minboxes;
     vector<float4> maxboxes;
 
-    vector<Material> mats;
-
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     // Loading environment map
     //---------------------------------------------------------------------------------------------------------------------------------------------------
 
-    EnvironmentMapManager envManager(ASSET_PATH("assets/environment/lakeside_sunrise_2k.exr"));
-    //EnvironmentMapManager envManager(ASSET_PATH("assets/environment/black.exr"));
-    //envManager.setRotation(70.0f + (float)renderNumber);
-    envManager.setRotation(130.0f);
-    
-    //---------------------------------------------------------------------------------------------------------------------------------------------------
-    // Loading Textures
-    //---------------------------------------------------------------------------------------------------------------------------------------------------
-
-    TextureManager texManager;
-
-    // All of these are 8-bit sRGB base-color maps; the hardware linearizes them.
-    int tex_enkidu      = texManager.addFromFile(ASSET_PATH("assets/textures/enkidutexture.bmp"), TEX_SRGB);
-    int tex_enkiduChibi = texManager.addFromFile(ASSET_PATH("assets/textures/enkiduchibitexture.bmp"), TEX_SRGB);
-    int tex_leaf        = texManager.addFromFile(ASSET_PATH("assets/textures/leaftex2.bmp"), TEX_SRGB);
-    int tex_leafAutumn  = texManager.addFromFile(ASSET_PATH("assets/textures/leafautumn.bmp"), TEX_SRGB);
-    int tex_wood        = texManager.addFromFile(ASSET_PATH("assets/textures/wood.bmp"), TEX_SRGB);
-    int tex_wall        = texManager.addFromFile(ASSET_PATH("assets/textures/wall.bmp"), TEX_SRGB);
-    int tex_glove       = texManager.addFromFile(ASSET_PATH("assets/textures/Material.006_baseColor.bmp"), TEX_SRGB);
-
-    TextureView texView = texManager.getView();
+    std::string envMapPath = config.envMapPath.empty() ? "assets/environment/black.exr" : config.envMapPath;
+    EnvironmentMapManager envManager(ASSET_PATH(envMapPath));
+    envManager.setRotation(config.envMapRotation);
 
     //---------------------------------------------------------------------------------------------------------------------------------------------------
-    // Creating Materials
+    // Loading Scene (materials, textures, OBJ meshes, glTF assets) via the shared SceneLoader
     //---------------------------------------------------------------------------------------------------------------------------------------------------
+    SceneLoader loader;   // declared BEFORE gpuScene: locals destroy in reverse order, and
+                           // gpuScene->shadeContext borrows device handles loader.textures owns.
+    loader.loadFromConfig(config);
 
-    Material wood = Material::Leaf(tex_wood, 1.5f, 0.3f, f4(), 0.00f);
-    Material wall = Material::DiffuseTextured(tex_wall);
-    Material lambertTextured = Material::DiffuseTextured(tex_enkidu);
-    Material lambert2Textured = Material::DiffuseTextured(tex_enkiduChibi);
-
-    Material lambertBlue = Material::Diffuse(f4(0.4f,0.4f,0.8f));
-    Material lambertGrey = Material::Diffuse(f4(0.8f,0.8f,0.8f));
-    Material lambertGreyBlue = Material::Diffuse(f4(0.6f,0.6f,0.7f));
-    Material lambertWhite = Material::Diffuse(f4(0.9f,0.9f,0.9f));
-    Material lambertGreen = Material::Diffuse(f4(0.2f,0.6f,0.6f));
-    Material lambertRed = Material::Diffuse(f4(0.90f,0.1f,0.1f));
-    Material lambertVeryGreen = Material::Diffuse(f4(0.1f,0.9f,0.1f));
-    Material lambertBLACK = Material::Diffuse(f4(0.0f,0.0f,0.0f));
-    Material lambert95 = Material::Diffuse(f4(0.95f,0.95f,0.95f));
-    Material lambert1 = Material::Diffuse(f4(1.0f));
-    Material lambert50 = Material::Diffuse(f4(0.5f,0.5f,0.5f));
-
-    float4 eta_steel = f4(0.14f, 0.16f, 0.13f);   // real part (R,G,B,alpha)
-    float4 k_steel   = f4(4.1f, 2.3f, 3.1f);     // imaginary part (absorption)
-
-
-    float4 eta_gold = f4(0.17f, 0.35f, 1.5f);  // real part of refractive index
-    float4 k_gold   = f4(3.1f, 2.7f, 1.9f);   // imaginary part, absorption
-    float roughness_polished = 0.05f;  
-    float roughness_rough = 0.15f;  
-    float roughness_rougher = 0.35f;  
-
-    Material gold = Material::Metal(eta_gold, eta_gold, roughness_polished);
-    Material gold15 = Material::Metal(eta_gold, eta_gold, roughness_rough);
-    Material steel = Material::Metal(eta_steel, eta_steel, roughness_rough);
-    Material steelSmooth = Material::Metal(eta_steel, eta_steel, roughness_polished);
-    Material steel25 = Material::Metal(eta_steel, eta_steel, 0.25f);
-    Material roughSteel = Material::Metal(eta_steel, eta_steel, roughness_rougher);
-
-    float ior = 1.5f;
-
-    Material glass = Material::SmoothDielectric(ior, f4(0.0f), 1);
-    Material diamond = Material::SmoothDielectric(2.42f, f4(0.0f), 1);
-
-    Material water = Material::SmoothDielectric(1.333f, f4(), 2);
-    Material tea = Material::SmoothDielectric(1.333f, 2.5f * f4(0.180f, 1.5f, 2.996f), 2);
-
-    Material ice = Material::SmoothDielectric(1.31f, f4(0.2f), 0);
-
-    Material air = Material::SmoothDielectric(1.0f, f4(0.0f), 99);
-
-    //Material leaf = Material::Leaf(1.5f, 0.6f, f4(0.8f, 0.25f, 0.28f), 0.2f);
-    Material leaf = Material::Leaf(tex_leaf, 1.5f, 0.10f, f4(0.22f, 0.75f, 0.28f), 0.15f);
-    Material leafAutumn = Material::Leaf(tex_leafAutumn, 1.5f, 0.8f, f4(0.22f, 0.75f, 0.28f), 0.6f);
-    Material canopy = Material::Leaf(tex_leaf, 1.5f, 0.9f, f4(0.22f, 0.75f, 0.28f), 0.7f);
-    Material leafStem = Material::Diffuse(f4(0.90f, 0.9f, 0.83f));
-    Material sky = Material::Diffuse(f4(0.4f, 0.4f, 1.00f));
-
-    Material mirror = Material::Mirror();
-    Material thinGlass = Material::ThinDielectric(1.5f);
-
-
-    Material blade = Material::Metal(f4(2.88f, 2.49f, 2.12f), f4(3.05f, 2.97f, 2.76f), 0.15f);
-
-    Material liners = Material::Metal(f4(1.80f, 1.40f, 0.40f), f4(2.10f, 2.80f, 4.20f), 0.35f);
-
-    Material hardware = Material::Metal(eta_steel, k_steel, 0.45f);
-
-    float4 cf_albedo = f4(0.03f, 0.03f, 0.03f);
-    Material handles = Material::Diffuse(cf_albedo);
-
-    Material glove = Material::Leaf(tex_glove, 1.5f, 0.4f, f4(), 0.00f);
-
-    mats.push_back(air); // index 0
-
-    mats.push_back(lambertBlue); // index 1
-    mats.push_back(lambertWhite); // index 2
-    mats.push_back(lambertGreen); // index 3
-    mats.push_back(gold); // index 4
-    mats.push_back(glass); // index 5
-    mats.push_back(lambertRed); // index 6
-    mats.push_back(steel); // index 7
-    mats.push_back(tea); // index 8
-    mats.push_back(ice); // index 9
-    mats.push_back(water); // index 10
-    mats.push_back(lambertTextured); // index 11
-    mats.push_back(lambert2Textured); // index 12
-    mats.push_back(leaf); // index 13
-    mats.push_back(leafStem); // index 14
-    mats.push_back(sky); // index 15
-    mats.push_back(leafAutumn); // index 16
-    mats.push_back(lambertGrey); // index 17
-    mats.push_back(diamond); // index 18
-    mats.push_back(mirror); // index 19
-    mats.push_back(lambertBLACK); // index 20
-    mats.push_back(lambert95); // index 21
-    mats.push_back(lambert50); // index 22
-    mats.push_back(lambertVeryGreen); // index 23
-    mats.push_back(wood); // index 24
-    mats.push_back(lambertGreyBlue); // index 25
-    mats.push_back(wall); // index 26
-    mats.push_back(roughSteel); // index 27
-    mats.push_back(thinGlass); // index 28
-    mats.push_back(steelSmooth); // index 29
-    mats.push_back(steel25); // index 30
-    mats.push_back(gold15); // index 31
-    mats.push_back(lambert1); // index 32
-    mats.push_back(blade); // index 33
-    mats.push_back(liners); // index 34
-    mats.push_back(hardware); // index 35
-    mats.push_back(handles); // index 36
-    mats.push_back(glove); // index 37
-
-    Material* mats_d;
-
-    cudaMalloc(&mats_d, mats.size() * sizeof(Material));
-    cudaMemcpy(mats_d, mats.data(), mats.size() * sizeof(Material), cudaMemcpyHostToDevice);
-
-    vector<LightDescriptor> lightDesc;
-
-    for (MeshConfig c : config.meshes)
-    {
-        readObjSimple(ASSET_PATH(c.path), points, normals, colors, uvs, mesh, lightsvec, lightDesc, f3(),
-                c.emissionMultiplier * c.emissionColor, c.materialID);
+    if (animatedObjPath != "invalid" && config.name == "watersim") {
+        MeshConfig animCfg;
+        animCfg.path = animatedObjPath;
+        animCfg.materialID = 10;
+        animCfg.emissionMultiplier = 0.0f;
+        animCfg.emissionColor = f3();
+        loader.loadOBJ(animCfg, f3(0.0f, -0.9f, 0.0f));  // preserves the existing hardcoded offset/materialID
     }
 
-    if (animatedObjPath != "invalid" && config.name == "watersim")
-    {
-        readObjSimple(animatedObjPath, points, normals, colors, uvs, mesh, lightsvec, lightDesc, f3(),
-                f3(), 10, f3(0.0f, -0.9f, 0.0f));
-    }
+    std::unique_ptr<GPUScene> gpuScene = loader.buildFlattened(envManager.getView(), 0.5f);
 
-    Vertices* verts;
-    Triangle* scene;
-
-    cudaMalloc(&verts,  sizeof(Vertices));
-    Vertices temp;
-
-    cudaMalloc(&temp.positions, sizeof(float4) * points.size());
-    cudaMalloc(&temp.normals, sizeof(float4) * normals.size());
-    cudaMalloc(&temp.uvs,  sizeof(float2) * uvs.size());
-
-    cudaMemcpy(temp.positions, points.data(), points.size() * sizeof(float4), cudaMemcpyHostToDevice);
-    cudaMemcpy(temp.normals, normals.data(), normals.size() * sizeof(float4), cudaMemcpyHostToDevice);
-    cudaMemcpy(temp.uvs, uvs.data(), uvs.size() * sizeof(float2), cudaMemcpyHostToDevice);
-    cudaMemcpy(verts, &temp, sizeof(Vertices), cudaMemcpyHostToDevice);
-
-    if (mesh.size() == 0) {
+    if (gpuScene->hostTriangles.empty()) {
         cout << "Error: No triangles loaded." << endl;
         return 1;
     }
-    cout << "scene data read. There are " << mesh.size() << " Triangles and " << lightsvec.size() << " +1 lights" << endl;
+    cout << "scene data read. There are " << gpuScene->hostTriangles.size() << " Triangles and "
+         << gpuScene->shadeContext.lightNum << " +1 lights" << endl;
+
+    // Aliases so every existing per-integrator block below (BDPT/SPPM/VCM/wavefront/volume/
+    // unidirectional) keeps working unmodified.
+    Material*    mats_d   = gpuScene->d_materials;
+    TextureView  texView  = gpuScene->shadeContext.textures;
+    Vertices*    verts    = gpuScene->d_vertices;
+    Triangle*    scene    = gpuScene->d_scene;
+    const Triangle* lights = gpuScene->shadeContext.lights;   // ShadeContext::lights is `const Triangle*
+                                                                // __restrict__` — must stay const here.
+    int          lightNum = gpuScene->shadeContext.lightNum;
+    vector<float4>&   points = gpuScene->hostPositions;   // host-side, used only by computeInfoForBVH
+    vector<Triangle>& mesh   = gpuScene->hostTriangles;
+    LightSamplerManager& lightManager = *gpuScene->lightManager;
 
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     // Loading Volumes
@@ -436,9 +297,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
     //---------------------------------------------------------------------------------------------------------------------------------------------------
 
     vertices.positions = points.data();
-    vertices.normals   = normals.data();
-    vertices.uvs    = uvs.data();
-    
+
     vector<int> primType;
     vector<int> originalIndices;
 
@@ -490,18 +349,9 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
     int2* BVHindices;
     Volume* d_volumes;
 
-    Triangle* lights;
-
-    // allocates and deallocates device pointer for lights (device light array)
-    LightSamplerManager lightManager(lightDesc, lightsvec, points, lights, envManager.getView());
-    
-    cudaMalloc(&scene, mesh.size() * sizeof(Triangle));
-    //cudaMalloc(&lights, lightsvec.size() * sizeof(Triangle));
     cudaMalloc(&BVH, bvhvec.size() * sizeof(BVHnode));
     cudaMalloc(&BVHindices, indvec.size() * sizeof(int2));
 
-    cudaMemcpy(scene, mesh.data(), mesh.size() * sizeof(Triangle), cudaMemcpyHostToDevice);
-    //cudaMemcpy(lights, lightsvec.data(), lightsvec.size() * sizeof(Triangle), cudaMemcpyHostToDevice);
     cudaMemcpy(BVH, bvhvec.data(), bvhvec.size() * sizeof(BVHnode), cudaMemcpyHostToDevice);
     cudaMemcpy(BVHindices, gpu_indirection.data(), gpu_indirection.size() * sizeof(int2), cudaMemcpyHostToDevice);
 
@@ -518,7 +368,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
 
     
     if (integratorChoice == UNIDIRECTIONAL)
-        launch_unidirectional(maxDepth, camera, mats_d, texView, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
+        launch_unidirectional(maxDepth, camera, mats_d, texView, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightNum, sampleCount, true, w, h, out_colors);
     else if (integratorChoice == BIDIRECTIONAL)
     {
         int totalEyePathVertices = w * h * eyePathDepth;
@@ -595,7 +445,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
         cudaMemcpy(lightPath_d, &tempPaths1, sizeof(PathVertices), cudaMemcpyHostToDevice);
 
         launch_bidirectional(eyePathDepth, lightPathDepth, camera, eyePath_d, lightPath_d, mats_d, texView, BVH, 
-            BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, w, h, 
+            BVHindices, verts, points.size(), scene, mesh.size(), lights, lightNum, sampleCount, w, h, 
             sceneCenter, sceneRadius, out_colors, out_overlay, config.postProcess);
         cudaFree(eyePath_d);
         cudaFree(lightPath_d);
@@ -630,7 +480,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
     }
     else if (integratorChoice == NAIVE_UNIDIRECTIONAL)
     {
-        launch_naive_unidirectional(maxDepth, camera, mats_d, texView, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
+        launch_naive_unidirectional(maxDepth, camera, mats_d, texView, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightNum, sampleCount, true, w, h, out_colors);
     }
     else if (integratorChoice == SPPM)
     {
@@ -678,7 +528,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
             BVH, BVHindices, 
             verts, points.size(), 
             scene, mesh.size(), 
-            lights, lightsvec.size(), sampleCount, 
+            lights, lightNum, sampleCount, 
             w, h, 
             sceneCenter, sceneRadius, sceneMin,
             out_colors, out_overlay,
@@ -815,7 +665,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
             BVH, BVHindices, 
             verts, points.size(), 
             scene, mesh.size(), 
-            lights, lightsvec.size(), sampleCount, 
+            lights, lightNum, sampleCount, 
             w, h, 
             sceneCenter, sceneRadius, sceneMin,
             out_colors, out_overlay,
@@ -869,7 +719,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
         SceneContext sc;
         sc.BVH = BVH;
         sc.BVHindices = BVHindices;
-        sc.lightNum = lightsvec.size();
+        sc.lightNum = lightNum;
         sc.lights = lights;
         sc.scene = scene;
         sc.triNum = mesh.size();
@@ -895,7 +745,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
         SceneContext sc;
         sc.BVH = BVH;
         sc.BVHindices = BVHindices;
-        sc.lightNum = lightsvec.size();
+        sc.lightNum = lightNum;
         sc.lights = lights;
         sc.scene = scene;
         sc.triNum = mesh.size();
@@ -961,24 +811,17 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
     // memory freeing
     cudaFree(out_colors);
     cudaFree(out_overlay);
-    cudaFree(verts);
-    cudaFree(scene);
-    //cudaFree(lights); freed in the light manager
+    // scene vertices/triangles/materials/textures are owned by gpuScene/loader (RAII)
     cudaFree(BVH);
     cudaFree(BVHindices);
-    cudaFree(mats_d);
-    // textures are owned by texManager (RAII); no manual free needed
 
     for (const Volume& vol : volumes) {
         if (vol.density_pointer) cudaFree(vol.density_pointer);
         if (vol.temperature_pointer) cudaFree(vol.temperature_pointer);
     }
-    
+
     if (d_volumes) cudaFree(d_volumes);
 
-    cudaFree(temp.positions);
-    cudaFree(temp.normals);
-    cudaFree(temp.uvs);
     delete[] host_colors;
     delete[] host_overlay;
 
@@ -1076,22 +919,21 @@ void printNvdbMetadata(const std::string& filePath) {
     }
 }
 
-int main ()
-{
-    printNvdbMetadata(ASSET_PATH("assets/vdb/nvdb/industrial/smoke_0000.nvdb"));
-    string configName = ASSET_PATH("configs/config.rendertron");
 
-    initRender(configName, 0); 
-    //return;
-    for (int i = 0; i < 250; ++i) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "assets/scenedata/watersim/tenbillionobj/wateranim%04d.obj", i);
-        //initRender(configName, i, buf); 
-        initRender(configName, i);
+int main(int argc, char* argv[]) {
+    std::cout << "Novum Experimental Optix Branch Launched\n ----------------------------------------------------------------------------------------------\n";
+
+    std::vector<std::string> args(argv + 1, argv + argc);
+
+    if (argc <= 1) {
+        std::cout << "Usage: Enter config file path as argument to executable, from project root.\n Example: render.exe configs/config.rendertron \n";
+        return 0;
     }
 
-    cout << "All Renders Finished" << endl;
+    for (std::string str : args) {
+        initRender(ASSET_PATH(str), 0);
+    }
 
-    RNGManager::cleanup();
+    std::cout << "goodbye\n";
     return 0;
 }

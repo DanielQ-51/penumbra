@@ -1,5 +1,10 @@
 Name: window
 
+MaterialsFile: configs/materials.rendertron
+
+EnvMap: assets/environment/lakeside_sunrise_2k.exr
+EnvMap Rotation: 130.0
+
 width: 6884
 height: 2880
 

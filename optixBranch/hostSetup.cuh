@@ -539,224 +539,49 @@ int initRender(OptixEngineState& engineState, string configPath, int renderNumbe
             endl << endl;
     }
 
-    vector<float4> points;
-    vector<float4> normals;
-    vector<float4> colors; // unused now
-    vector<float2> uvs;
-    vector<Triangle> mesh;
-    vector<Triangle> lightsvec;
-    vector<Material> mats;
-
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     // Loading environment map
     //---------------------------------------------------------------------------------------------------------------------------------------------------
 
-#if USE_ENV_MAP == 1
-    //EnvironmentMapManager envManager(ASSET_PATH("assets/environment/lakeside_sunrise_1k.exr"));
-    EnvironmentMapManager envManager(ASSET_PATH("assets/environment/sunflowers_puresky_1k.exr"));
-#else
-    EnvironmentMapManager envManager(ASSET_PATH("assets/environment/black.exr"));
-#endif
-    //envManager.setRotation(70.0f + (float)renderNumber);
-    envManager.setRotation(130.0f);
-    
-    //---------------------------------------------------------------------------------------------------------------------------------------------------
-    // Loading Textures
-    //---------------------------------------------------------------------------------------------------------------------------------------------------
-
-    TextureManager texManager;
-
-    // All of these are 8-bit sRGB base-color maps; the hardware linearizes them.
-    int tex_enkidu      = texManager.addFromFile(ASSET_PATH("assets/textures/enkidutexture.bmp"), TEX_SRGB);
-    int tex_enkiduChibi = texManager.addFromFile(ASSET_PATH("assets/textures/enkiduchibitexture.bmp"), TEX_SRGB);
-    int tex_leaf        = texManager.addFromFile(ASSET_PATH("assets/textures/leaftex2.bmp"), TEX_SRGB);
-    int tex_leafAutumn  = texManager.addFromFile(ASSET_PATH("assets/textures/leafautumn.bmp"), TEX_SRGB);
-    int tex_wood        = texManager.addFromFile(ASSET_PATH("assets/textures/wood.bmp"), TEX_SRGB);
-    int tex_wall        = texManager.addFromFile(ASSET_PATH("assets/textures/wall.bmp"), TEX_SRGB);
-    int tex_glove       = texManager.addFromFile(ASSET_PATH("assets/textures/Material.006_baseColor.bmp"), TEX_SRGB);
+    std::string envMapPath = config.envMapPath.empty() ? "assets/environment/black.exr" : config.envMapPath;
+    EnvironmentMapManager envManager(ASSET_PATH(envMapPath));
+    envManager.setRotation(config.envMapRotation);
 
     //---------------------------------------------------------------------------------------------------------------------------------------------------
-    // Creating Materials
+    // Loading Scene (materials, textures, OBJ meshes, glTF assets) via the shared SceneLoader
     //---------------------------------------------------------------------------------------------------------------------------------------------------
+    SceneLoader loader;   // declared BEFORE gpuScene: locals destroy in reverse order, and
+                           // gpuScene->shadeContext borrows device handles loader.textures owns.
+    loader.loadFromConfig(config);
 
-    Material principledWood = Material::Principled(f4(1.0f), 0.0f, 0.15f, tex_wood, -1);
+    std::unique_ptr<GPUScene> gpuScene = loader.buildFlattened(envManager.getView(), 0.5f);
 
-    Material wood = Material::Leaf(tex_wood, 1.5f, 0.3f, f4(), 0.00f);
-    Material wall = Material::DiffuseTextured(tex_wall);
-    Material lambertTextured = Material::DiffuseTextured(tex_enkidu);
-    Material lambert2Textured = Material::DiffuseTextured(tex_enkiduChibi);
-
-    Material lambertBlue = Material::Diffuse(f4(0.4f,0.4f,0.8f));
-    Material lambertGrey = Material::Diffuse(f4(0.8f,0.8f,0.8f));
-    Material lambertGreyBlue = Material::Diffuse(f4(0.6f,0.6f,0.7f));
-    Material lambertWhite = Material::Diffuse(f4(0.9f,0.9f,0.9f));
-    Material lambertGreen = Material::Diffuse(f4(0.2f,0.6f,0.6f));
-    Material lambertRed = Material::Diffuse(f4(0.90f,0.1f,0.1f));
-    Material lambertVeryGreen = Material::Diffuse(f4(0.1f,0.9f,0.1f));
-    Material lambertBLACK = Material::Diffuse(f4(0.0f,0.0f,0.0f));
-    Material lambert95 = Material::Diffuse(f4(0.95f,0.95f,0.95f));
-    Material lambert1 = Material::Diffuse(f4(1.0f));
-    Material lambert50 = Material::Diffuse(f4(0.5f,0.5f,0.5f));
-
-    float4 eta_steel = f4(0.14f, 0.16f, 0.13f);   // real part (R,G,B,alpha)
-    float4 k_steel   = f4(4.1f, 2.3f, 3.1f);     // imaginary part (absorption)
-
-
-    float4 eta_gold = f4(0.17f, 0.35f, 1.5f);  // real part of refractive index
-    float4 k_gold   = f4(3.1f, 2.7f, 1.9f);   // imaginary part, absorption
-    float roughness_polished = 0.05f;  
-    float roughness_rough = 0.15f;  
-    float roughness_rougher = 0.35f;  
-
-    Material gold = Material::Metal(eta_gold, eta_gold, roughness_polished);
-    Material gold15 = Material::Metal(eta_gold, eta_gold, roughness_rough);
-    Material steel = Material::Metal(eta_steel, eta_steel, roughness_rough);
-    Material steelSmooth = Material::Metal(eta_steel, eta_steel, roughness_polished);
-    Material steel25 = Material::Metal(eta_steel, eta_steel, 0.25f);
-    Material roughSteel = Material::Metal(eta_steel, eta_steel, roughness_rougher);
-
-    float ior = 1.5f;
-
-    Material glass = Material::SmoothDielectric(ior, f4(0.0f), 1);
-    Material diamond = Material::SmoothDielectric(2.42f, f4(0.0f), 1);
-
-    Material water = Material::SmoothDielectric(1.333f, f4(), 2);
-    Material tea = Material::SmoothDielectric(1.333f, 2.5f * f4(0.180f, 1.5f, 2.996f), 2);
-
-    Material ice = Material::SmoothDielectric(1.31f, f4(0.2f), 0);
-
-    Material air = Material::SmoothDielectric(1.0f, f4(0.0f), 99);
-
-    //Material leaf = Material::Leaf(1.5f, 0.6f, f4(0.8f, 0.25f, 0.28f), 0.2f);
-    Material leaf = Material::Leaf(tex_leaf, 1.5f, 0.10f, f4(0.22f, 0.75f, 0.28f), 0.15f);
-    Material leafAutumn = Material::Leaf(tex_leafAutumn, 1.5f, 0.8f, f4(0.22f, 0.75f, 0.28f), 0.6f);
-    Material canopy = Material::Leaf(tex_leaf, 1.5f, 0.9f, f4(0.22f, 0.75f, 0.28f), 0.7f);
-    Material leafStem = Material::Diffuse(f4(0.90f, 0.9f, 0.83f));
-    Material sky = Material::Diffuse(f4(0.4f, 0.4f, 1.00f));
-
-    Material mirror = Material::Mirror();
-    Material thinGlass = Material::ThinDielectric(1.5f);
-
-
-    Material blade = Material::Metal(f4(2.88f, 2.49f, 2.12f), f4(3.05f, 2.97f, 2.76f), 0.15f);
-
-    Material liners = Material::Metal(f4(1.80f, 1.40f, 0.40f), f4(2.10f, 2.80f, 4.20f), 0.35f);
-
-    Material hardware = Material::Metal(eta_steel, k_steel, 0.45f);
-
-    float4 cf_albedo = f4(0.03f, 0.03f, 0.03f);
-    Material handles = Material::Diffuse(cf_albedo);
-
-    Material glove = Material::Leaf(tex_glove, 1.5f, 0.4f, f4(), 0.00f);
-
-    mats.push_back(air); // index 0
-
-    mats.push_back(lambertBlue); // index 1
-    mats.push_back(lambertWhite); // index 2
-    mats.push_back(lambertGreen); // index 3
-    mats.push_back(gold); // index 4
-    mats.push_back(glass); // index 5
-    mats.push_back(lambertRed); // index 6
-    mats.push_back(steel); // index 7
-    mats.push_back(tea); // index 8
-    mats.push_back(ice); // index 9
-    mats.push_back(water); // index 10
-    mats.push_back(lambertTextured); // index 11
-    mats.push_back(lambert2Textured); // index 12
-    mats.push_back(leaf); // index 13
-    mats.push_back(leafStem); // index 14
-    mats.push_back(sky); // index 15
-    mats.push_back(leafAutumn); // index 16
-    mats.push_back(lambertGrey); // index 17
-    mats.push_back(diamond); // index 18
-    mats.push_back(mirror); // index 19
-    mats.push_back(lambertBLACK); // index 20
-    mats.push_back(lambert95); // index 21
-    mats.push_back(lambert50); // index 22
-    mats.push_back(lambertVeryGreen); // index 23
-    mats.push_back(wood); // index 24
-    mats.push_back(lambertGreyBlue); // index 25
-    mats.push_back(wall); // index 26
-    mats.push_back(roughSteel); // index 27
-    mats.push_back(thinGlass); // index 28
-    mats.push_back(steelSmooth); // index 29
-    mats.push_back(steel25); // index 30
-    mats.push_back(gold15); // index 31
-    mats.push_back(lambert1); // index 32
-    mats.push_back(blade); // index 33
-    mats.push_back(liners); // index 34
-    mats.push_back(hardware); // index 35
-    mats.push_back(handles); // index 36
-    mats.push_back(glove); // index 37
-    mats.push_back(principledWood); // index 38
-
-    Material* mats_d;
-
-    cudaMalloc(&mats_d, mats.size() * sizeof(Material));
-    cudaMemcpy(mats_d, mats.data(), mats.size() * sizeof(Material), cudaMemcpyHostToDevice);
-
-    vector<LightDescriptor> lightDesc;
-
-    for (MeshConfig c : config.meshes)
-    {
-        readObjSimple(ASSET_PATH(c.path), points, normals, colors, uvs, mesh, lightsvec, lightDesc, f3(),
-                c.emissionMultiplier * c.emissionColor, c.materialID);
-    }
-
-    Vertices* verts;
-    Triangle* scene;
-
-    cudaMalloc(&verts,  sizeof(Vertices));
-    Vertices temp;
-
-    cudaMalloc(&temp.positions, sizeof(float4) * points.size());
-    cudaMalloc(&temp.normals, sizeof(float4) * normals.size());
-    cudaMalloc(&temp.uvs,  sizeof(float2) * uvs.size());
-
-    cudaMemcpy(temp.positions, points.data(), points.size() * sizeof(float4), cudaMemcpyHostToDevice);
-    cudaMemcpy(temp.normals, normals.data(), normals.size() * sizeof(float4), cudaMemcpyHostToDevice);
-    cudaMemcpy(temp.uvs, uvs.data(), uvs.size() * sizeof(float2), cudaMemcpyHostToDevice);
-    cudaMemcpy(verts, &temp, sizeof(Vertices), cudaMemcpyHostToDevice);
-
-    if (mesh.size() == 0) {
+    if (gpuScene->hostTriangles.empty()) {
         cout << "Error: No triangles loaded." << endl;
         return 1;
     }
-    cout << "scene data read. There are " << mesh.size() << " Triangles and " << lightsvec.size() << " +1 lights" << endl;
+    cout << "scene data read. There are " << gpuScene->hostTriangles.size() << " Triangles and "
+         << gpuScene->shadeContext.lightNum << " +1 lights" << endl;
 
     auto afterRead = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed_seconds_afterRead = afterRead - start;
     std::cout << "Scene read took: " << elapsed_seconds_afterRead.count() << " seconds" << std::endl << endl;
-    
+
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     // Computing BVH
     //---------------------------------------------------------------------------------------------------------------------------------------------------
-    SceneLoader loader = {};
-    loader.textures.setMaxDimension(2048);
-    loader.setEmissiveScale(1.0f);
-    loader.loadGLTF(ASSET_PATH("assets/gltf/main_sponza/NewSponza_Main_glTF_003.gltf"));
-    loader.loadGLTF(ASSET_PATH("assets/gltf/pkg_a_curtains/NewSponza_Curtains_glTF.gltf"));
-    //loader.loadGLTF(ASSET_PATH("assets/gltf/pkg_d_10k_candles/NewSponza_4_Combined_glTF.gltf"));
-    //loader.loadGLTF(ASSET_PATH("assets/gltf/main_sponza/blendersponza/updatedsponza.gltf"));
-
-    printPrincipledMaterials(loader);
-    std::unique_ptr<GPUScene> gpuScene = loader.buildFlattened(envManager.getView(), 0.9f);
-
-    points = gpuScene->hostPositions;
-    mesh = gpuScene->hostTriangles;
-
     vector<float3> positions;
     vector<uint3> indices;
 
-    positions.reserve(points.size());
+    positions.reserve(gpuScene->hostPositions.size());
 
-    std::transform(points.begin(), points.end(), std::back_inserter(positions), 
+    std::transform(gpuScene->hostPositions.begin(), gpuScene->hostPositions.end(), std::back_inserter(positions),
         [](const float4& v) {
             return make_float3(v.x, v.y, v.z);
         }
     );
 
-    for (Triangle& t : mesh) {
+    for (Triangle& t : gpuScene->hostTriangles) {
         indices.push_back(make_uint3(t.aInd, t.bInd, t.cInd));
     }
 
@@ -818,14 +643,6 @@ int initRender(OptixEngineState& engineState, string configPath, int renderNumbe
     std::chrono::duration<double> elapsed_seconds_afterBVH = afterBVH - afterRead;
     std::cout << "BVH construction took: " << elapsed_seconds_afterBVH.count() << " seconds" << std::endl << endl;
 
-    Triangle* lights;
-
-    // allocates and deallocates device pointer for lights (device light array)
-    LightSamplerManager lightManager(lightDesc, lightsvec, points, lights, envManager.getView());
-    
-    cudaMalloc(&scene, mesh.size() * sizeof(Triangle));
-    cudaMemcpy(scene, mesh.data(), mesh.size() * sizeof(Triangle), cudaMemcpyHostToDevice);
-
     float4* out_colors;
     cudaMalloc(&out_colors, w * h * sizeof(float4));
     cudaMemset(out_colors, 0, w * h * sizeof(float4));
@@ -836,29 +653,26 @@ int initRender(OptixEngineState& engineState, string configPath, int renderNumbe
 
     float4* host_colors = new float4[w * h];
 
-    ShadeContext sc = {};
-
-    sc.lightNum = lightsvec.size();
-    sc.lights = lights;
-    sc.scene = scene;
-    sc.vertices = verts;
-    sc.materials = mats_d;
-    sc.textures = texManager.getView();
-    sc.lightSampler = lightManager.getSampler();
-    sc.triNum = mesh.size();
-    sc.transformationMatrices = d_matrices;
-
     CommonParams params = {};
     params.w = w;
     params.h = h;
     params.frame_index = 0;
-    params.bvh_handle = TLAShandle; 
-    params.accum_buffer = out_colors; 
+    params.bvh_handle = TLAShandle;
+    params.accum_buffer = out_colors;
     params.camera = camera;
-    params.shadeContext = sc; // beep beep remove later
-    gpuScene->shadeContext.transformationMatrices = d_matrices;
     params.shadeContext = gpuScene->shadeContext;
-    
+
+    // buildFlattened() leaves transformationMatrices null (its output is already
+    // world-space, so no per-instance transform is needed at shading time). But
+    // traceClosest() (optixUtils.cuh) always reads a REAL OptiX instance ID via
+    // optixHitObjectGetInstanceId() -- never the 0xFFFFFFFF "no transform" sentinel,
+    // since that's only meaningful for bare-GAS/software tracing -- and passes it
+    // into getBarycentrics(), which unconditionally dereferences transformationMatrices
+    // for any non-sentinel id. With a real IAS (even our single identity instance),
+    // that id is 0, so the pointer must be valid. d_matrices holds exactly that
+    // identity transform, uploaded alongside the GAS/IAS build above.
+    params.shadeContext.transformationMatrices = d_matrices;
+
     params.shadeContext.lightSampler.printDebugState();
     params.max_depth = maxDepth;
 
@@ -899,14 +713,7 @@ int initRender(OptixEngineState& engineState, string configPath, int renderNumbe
     cudaFree(reinterpret_cast<void*>(d_matrices));
     cudaFree(out_colors);
     cudaFree(d_finalOutput);
-    cudaFree(verts);
-    cudaFree(scene);
-    cudaFree(mats_d);
-    // textures are owned by texManager (RAII); no manual free needed
-
-    cudaFree(temp.positions);
-    cudaFree(temp.normals);
-    cudaFree(temp.uvs);
+    // scene vertices/triangles/materials/textures are owned by gpuScene/loader (RAII)
     delete[] host_colors;
 
     std::string filename = std::string(ROOT_DIR) + "/renders/optix/" + config.name + "" + std::to_string(renderNumber) + ".bmp";

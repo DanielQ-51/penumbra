@@ -1,0 +1,35 @@
+Name: sponza
+
+MaterialsFile: configs/materials.rendertron
+
+EnvMap: assets/environment/sunflowers_puresky_1k.exr
+EnvMap: assets/environment/lakeside_sunrise_2k.exr
+EnvMap Rotation: 0.0
+
+width: 4096
+height: 1716
+
+width: 1920
+height: 1080
+
+Integrator: RESTIRPT
+Sample Count: 1000
+Post Process: true
+
+Unidirectional Max Depth: 12
+BVH recommended leaf size: 2
+
+Pinhole Camera: true
+Camera Position: -7.40743 1.59222 -0.858258
+Camera Rotation: 32.2 -100.69 0.0
+Camera Apeture: 0.0
+Camera FocalDist: 0.0
+Camera FOV: 40.0
+
+Meshes (path; multiplier * emission; materialID):
+assets/scenedata/sponzaglass.obj; 0.0 * (0.0, 0.0, 0.0); 5
+
+GLTFs (path; maxTextureDim; emissionScale):
+assets/gltf/sponza_no_door/sponza_no_door.gltf; 2048; 1.0
+assets/gltf/sponza_lights/sponzalights.gltf; 512; 300.0
+

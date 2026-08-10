@@ -17,7 +17,7 @@
 // under renders/unidirectional/. 0 = clean ReSTIR-only build (no PT code, no
 // per-frame timing overhead compiled in).
 #ifndef EQUAL_TIME_COMPARE
-#define EQUAL_TIME_COMPARE 0
+#define EQUAL_TIME_COMPARE 1
 #endif
 
 // Master switch for device side debug instrumentation.
@@ -27,11 +27,11 @@
 #endif
 
 #ifndef SAVE_SEQUENCE
-#define SAVE_SEQUENCE 0
+#define SAVE_SEQUENCE 1
 #endif
 
 #ifndef SAVE_FOR_VIDEO
-#define SAVE_FOR_VIDEO 0
+#define SAVE_FOR_VIDEO 1
 #endif
 
 #ifndef ACCUMULATE_FRAMES
@@ -39,7 +39,7 @@
 #endif
 
 #ifndef DEBUG_VISUALIZE_TYPE
-#define DEBUG_VISUALIZE_TYPE 0
+#define DEBUG_VISUALIZE_TYPE 1
 #endif
 
 #ifndef TEMPORAL_SKIP_REVERSE_SHIFT
@@ -98,14 +98,10 @@
 #define DO_SPATIAL_SHIFT 1
 #endif
 
-#ifndef USE_ENV_MAP
-#define USE_ENV_MAP 1
-#endif
-
 // Run the OptiX denoiser (HDR model, albedo + geometric-normal guides) on the
 // reconstructed linear-HDR frame before tone-mapping. 0 = save the raw noisy frame.
 #ifndef USE_DENOISER
-#define USE_DENOISER 1
+#define USE_DENOISER 0
 #endif
 
 #ifndef TEMPORAL_USE_DUAL_MV

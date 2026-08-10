@@ -81,7 +81,21 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         restir.reservoir.setCachedJacobian(pixelIdx, -1.0f); // gate this out of shifts, like the empty-hit case
         restir.reservoir.setF(pixelIdx, 0u); // no reservoir here: zero contribution, not last-cycle stale radiance
         restir.gbuffer.setInvalidMotionVec(pixelIdx);
-        restir.denoiserGuides.setGuides(pixelIdx, f3(0.0f), f3(0.0f), f2(0.0f)); // env miss: no surface albedo/normal/flow
+
+        // Env miss has no world position to reproject, but it does have a world direction:
+        // run it through last frame's camera basis (rotation only, no cameraOrigin subtraction)
+        // to get the flow the panning sky needs. See Camera::dirToRaster.
+        float2 envDenoiserFlow = f2(0.0f);
+        if (params.frame_index != 0) {
+            float2 currPixelPos = make_float2((float)x + __half2float(jitter.x), (float)y + __half2float(jitter.y));
+            float2 lastPixelPos;
+            if (restir.lastFrameCamera.dirToRaster(r.direction, lastPixelPos)) {
+                envDenoiserFlow = currPixelPos - lastPixelPos;
+            }
+            // else: direction rotated out of last frame's FOV; leave flow at 0 and let the
+            // denoiser treat it as disoccluded, same as any other reprojection miss.
+        }
+        restir.denoiserGuides.setGuides(pixelIdx, f3(0.0f), -r.direction, envDenoiserFlow); // env miss: no surface albedo/normal, but flow now tracks camera rotation
         save_rng(pixelIdx, &localState, nullptr);
         return;
     }

@@ -17,13 +17,22 @@
 #define PTX_DIR "" 
 #endif
 
-int main() {
+int main(int argc, char* argv[]) {
     std::cout << "Novum Experimental Optix Branch Launched\n ----------------------------------------------------------------------------------------------\n";
+
+    std::vector<std::string> args(argv + 1, argv + argc);
+
+    if (argc <= 1) {
+        std::cout << "Usage: Enter config file path as argument to executable, from project root.\n Example: render.exe configs/config.rendertron \n";
+        return 0;
+    }
 
     OptixEngineState engineState;
     initOptixSystem(engineState);
 
-    initRender(engineState,  ASSET_PATH("configs/config.rendertron"), 0);
+    for (std::string str : args) {
+        initRender(engineState,  ASSET_PATH(str), 0);
+    }
 
     optixEngineCleanup(engineState);
     std::cout << "goodbye\n";

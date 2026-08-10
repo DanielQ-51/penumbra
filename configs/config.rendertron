@@ -1,16 +1,21 @@
 Name: render
 
+MaterialsFile: configs/materials.rendertron
+
+EnvMap: assets/environment/lakeside_sunrise_2k.exr
+EnvMap Rotation: 130.0
+
 width: 4096
 height:  1716
-width: 1920
-height: 1080
+width: 1400
+height: 1400
 
 Integrator: RESTIRPT
 
 Sample Count: 1000
 Post Process: true
 
-Unidirectional Max Depth: 12
+Unidirectional Max Depth: 8
 BVH recommended leaf size: 2
 
 SAMPLE_ENVIRONMENT: false
@@ -51,11 +56,11 @@ Camera Position: -7.40743 1.59222 -0.858258
 Camera Rotation: 12.2 -100.69 0.0
 Camera Apeture: 0.0
 Camera FocalDist: 0.0
-Camera FOV: 50.0
+Camera FOV: 40.0
 
 Meshes (path; multiplier * emission; materialID):
 assets/scenedata/cornellbox/boxOpenBack.obj; 0.0 * (0.0, 0.0, 0.0); 2
-assets/scenedata/cornellbox/leftBox.obj; 0.0 * (0.0, 0.0, 0.0); 38
+assets/scenedata/cornellbox/leftBox.obj; 0.0 * (0.0, 0.0, 0.0); 4
 assets/scenedata/cornellbox/bunny.obj; 0.0 * (0.0, 0.0, 0.0); 5
 assets/scenedata/cornellbox/leftteapot.obj; 0.0 * (0.0, 0.0, 0.0); 38
 .assets/scenedata/cornellbox/dragon.obj; 0.0 * (0.0, 0.0, 0.0); 5

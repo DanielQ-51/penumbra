@@ -4,6 +4,8 @@
 #include "sceneContexts.cuh"
 #include "material.cuh"
 #include "util.cuh"
+#include "helpers.cuh"
+#include "configParser.cuh"
 
 #include <tinygltf/tiny_gltf_v3.h>
 #include <vector>
@@ -17,6 +19,10 @@
 #include <utility>
 #include <thread>
 #include <atomic>
+
+#ifndef ROOT_DIR
+#define ROOT_DIR "."
+#endif
 
 // -----------------------------------------------------------------------------
 // Scene loader — an alternative to the manual scene-building path.
@@ -295,6 +301,19 @@ struct GPUScene {
     }
 };
 
+// Config-authored texture "PBR role" -> upload colorspace. Albedo/emission are
+// stored sRGB (hardware linearizes on sample); everything else (metal/roughness/
+// occlusion/transmission/normal maps) is data, not color, and stays linear.
+inline TexColorSpace colorSpaceForTextureType(TextureType t) {
+    switch (t) {
+        case TEX_ALBEDO:
+        case TEX_EMISSION:
+            return TEX_SRGB;
+        default: // TEX_METAL, TEX_ROUGHNESS, TEX_OCCLUSION, TEX_TRANSMISSION, TEX_NORMAL
+            return TEX_LINEAR;
+    }
+}
+
 // =============================================================================
 // SceneLoader — accumulate from mixed sources, then finalize.
 // =============================================================================
@@ -314,6 +333,85 @@ public:
     // emissiveFactor x emissiveStrength). Tune it so emissive surfaces sit on the
     // same brightness scale as your env map. Set before loadGLTF.
     void setEmissiveScale(float s) { emissiveScale_ = s; }
+
+    std::string resolveAssetPath(const std::string& relPath) const {
+        return std::string(ROOT_DIR) + "/" + relPath;
+    }
+
+    // ---- Config-driven textures --------------------------------------------
+    void loadTexturesFromConfig(const std::vector<TextureConfig>& cfgs) {
+        for (const TextureConfig& tc : cfgs) {
+            int idx = textures.addFromFile(resolveAssetPath(tc.path), colorSpaceForTextureType(tc.type));
+            if (idx < 0) {
+                std::cerr << "SceneLoader::loadTexturesFromConfig: failed to load '" << tc.name
+                          << "' (" << tc.path << ")\n";
+                continue;
+            }
+            if (namedTextures_.count(tc.name))
+                std::cerr << "SceneLoader::loadTexturesFromConfig: duplicate texture name '"
+                          << tc.name << "', overwriting\n";
+            namedTextures_[tc.name] = idx;
+        }
+    }
+
+    // ---- Config-driven materials --------------------------------------------
+    void loadMaterialsFromConfig(const std::vector<MaterialConfig>& cfgs) {
+        for (const MaterialConfig& mc : cfgs) addMaterial(buildMaterialFromConfig(mc));
+    }
+
+    // ---- Config-driven OBJ meshes -------------------------------------------
+    // OBJ meshes are never instanced (no SceneInstance/Mat4) — any placement is
+    // the static `offset` readObjSimple bakes directly into vertex positions at
+    // parse time, matching current engine behavior. Kept on their own flat,
+    // independently-indexed accumulator (objScene_) rather than forced into
+    // SceneMesh's unified-index model — buildFlattened() merges the two below.
+    bool loadOBJ(const MeshConfig& cfg, float3 offset = make_float3(0.0f, 0.0f, 0.0f)) {
+        readObjSimple(resolveAssetPath(cfg.path),
+                      objScene_.points, objScene_.normals, objScene_.colors, objScene_.uvs,
+                      objScene_.triangles, objScene_.lightTriangles, objScene_.lightDescriptors,
+                      make_float3(0.0f, 0.0f, 0.0f),          // c: legacy per-file tint, unused downstream
+                      cfg.emissionMultiplier * cfg.emissionColor,
+                      cfg.materialID, offset,
+                      0xFFFFFFFF);                            // instanceID: "no per-instance transform" sentinel
+        return true;
+    }
+
+    void loadOBJs(const std::vector<MeshConfig>& cfgs) {
+        for (const MeshConfig& c : cfgs) loadOBJ(c);
+    }
+
+    // ---- Orchestrator: drive a full hybrid (OBJ + glTF + config materials/
+    // textures) scene load from one RenderConfig. Order matters: materials/
+    // textures must exist before anything references them by index/name; OBJ
+    // meshes reference materials by raw index (MeshConfig::materialID); glTF
+    // assets build their own materials internally (loadMaterials(), unaffected
+    // by config-authored ones) and are loaded last since maxTextureDim/
+    // emissionScale are applied as loader-global state immediately before each
+    // entry's loadGLTF() call.
+    bool loadFromConfig(const RenderConfig& config) {
+        loadTexturesFromConfig(config.textures);
+        loadMaterialsFromConfig(config.materials);
+
+        loadOBJs(config.meshes);
+
+        for (const GLTFConfig& g : config.gltfs) {
+            if (g.maxTextureDim > 0) textures.setMaxDimension((int)g.maxTextureDim);
+            setEmissiveScale(g.emissionScale);
+            loadGLTF(resolveAssetPath(g.path));
+        }
+
+        // Defensive bounds check: a MeshConfig.materialID that doesn't index into
+        // `materials` would otherwise become a silent device-side OOB read.
+        for (Triangle& t : objScene_.triangles) {
+            if (t.materialID < 0 || t.materialID >= (int)materials.size()) {
+                std::cerr << "SceneLoader::loadFromConfig: OBJ triangle references out-of-range "
+                             "materialID " << t.materialID << " (materials.size()=" << materials.size()
+                          << "), clamping to 0\n";
+                t.materialID = 0;
+            }
+        }
+        return true;
+    }
 
     // Load a glTF/GLB. Appends object-space meshes, instances (world transforms
     // from the node hierarchy, pre-multiplied by `root`), materials, and
@@ -458,6 +556,50 @@ public:
             }
         }
 
+        // --- Merge OBJ-sourced flat data ---------------------------------------
+        // OBJ triangles use independent per-corner position/normal/uv indices
+        // (with -1 sentinels for missing normal/uv), unlike glTF's unified
+        // indexing above — offset each index stream independently, skipping the
+        // -1 sentinel. readObjSimple already tracks its own running offsets
+        // within objScene_'s accumulation across multiple loadOBJ() calls, so
+        // objScene_ arrives here already internally consistent; this just
+        // re-bases that soup onto the final merged arrays once.
+        {
+            const int baseVert     = (int)points.size();
+            const int baseNorm     = (int)normals.size();
+            const int baseUV       = (int)uvs.size();
+            const int baseTri      = (int)tris.size();
+            const int baseLightTri = (int)lightTris.size();
+
+            points.insert(points.end(),   objScene_.points.begin(),  objScene_.points.end());
+            normals.insert(normals.end(), objScene_.normals.begin(), objScene_.normals.end());
+            uvs.insert(uvs.end(),         objScene_.uvs.begin(),     objScene_.uvs.end());
+
+            auto off = [](int idx, int base) { return (idx < 0) ? idx : idx + base; };
+
+            for (Triangle t : objScene_.triangles) {
+                t.aInd = off(t.aInd, baseVert);   t.bInd = off(t.bInd, baseVert);   t.cInd = off(t.cInd, baseVert);
+                t.naInd = off(t.naInd, baseNorm); t.nbInd = off(t.nbInd, baseNorm); t.ncInd = off(t.ncInd, baseNorm);
+                t.uvaInd = off(t.uvaInd, baseUV); t.uvbInd = off(t.uvbInd, baseUV); t.uvcInd = off(t.uvcInd, baseUV);
+                t.triInd = baseTri + t.triInd;                                // re-sequence into merged tris[]
+                if (t.lightInd != -51) t.lightInd = baseLightTri + t.lightInd; // -51 = "not a light" sentinel
+                tris.push_back(t);
+            }
+            for (Triangle lt : objScene_.lightTriangles) {
+                lt.aInd = off(lt.aInd, baseVert);   lt.bInd = off(lt.bInd, baseVert);   lt.cInd = off(lt.cInd, baseVert);
+                lt.naInd = off(lt.naInd, baseNorm); lt.nbInd = off(lt.nbInd, baseNorm); lt.ncInd = off(lt.ncInd, baseNorm);
+                lt.uvaInd = off(lt.uvaInd, baseUV); lt.uvbInd = off(lt.uvbInd, baseUV); lt.uvcInd = off(lt.uvcInd, baseUV);
+                lt.triInd = baseTri + lt.triInd;
+                lt.lightInd = baseLightTri + lt.lightInd;
+                lightTris.push_back(lt);
+            }
+            for (LightDescriptor ld : objScene_.lightDescriptors) {
+                ld.startInd += baseLightTri;
+                ld.instanceID = 0xFFFFFFFF; // normalize to the same "no transform" sentinel glTF instances use
+                lightDesc.push_back(ld);
+            }
+        }
+
         if (tris.empty()) {
             std::cerr << "buildFlattened: no triangles.\n";
             return gpu;
@@ -528,12 +670,95 @@ private:
         bool ok = false;
     };
 
+    // Flat, independently-indexed accumulation for config-driven OBJ meshes —
+    // mirrors exactly what readObjSimple already produces. Kept separate from
+    // SceneMesh's unified-index model (see loadOBJ's comment); buildFlattened()
+    // merges this into its final output alongside the glTF-instance flattening.
+    struct ObjSceneData {
+        std::vector<float4>   points;
+        std::vector<float4>   normals;
+        std::vector<float4>   colors;   // legacy/unused tint param, kept for readObjSimple's signature
+        std::vector<float2>   uvs;
+        std::vector<Triangle> triangles;
+        std::vector<Triangle> lightTriangles;
+        std::vector<LightDescriptor> lightDescriptors;
+    };
+    ObjSceneData objScene_;
+
+    std::unordered_map<std::string, int> namedTextures_; // config-authored texture name -> texture index
+
     std::string                     baseDir_;
     std::unordered_map<int, int>    gltfTextureMap_;  // glTF texture idx -> our texture idx
     std::vector<int>                gltfMaterialMap_; // glTF material idx -> our material idx
     int                             defaultMaterialID_ = -1;
     float                           emissiveScale_ = 1.0f; // global emission multiplier
     std::vector<DecodedImage>       imageCache_;      // glTF image idx -> decoded pixels
+
+    int resolveTextureName(const std::string& name) const {
+        auto it = namedTextures_.find(name);
+        if (it == namedTextures_.end()) {
+            std::cerr << "SceneLoader: unknown texture name '" << name << "', using none (-1)\n";
+            return -1;
+        }
+        return it->second;
+    }
+
+    // Maps one Materials: config line to a Material via the matching Material::
+    // factory. Texture-slot fields hold a texture NAME, resolved against
+    // namedTextures_ (populated by loadTexturesFromConfig, which must run first).
+    // Missing params fall back to the same defaults as the corresponding factory.
+    Material buildMaterialFromConfig(const MaterialConfig& mc) {
+        auto getF = [&](const char* k, float def) -> float {
+            auto it = mc.params.find(k); return it != mc.params.end() ? std::stof(it->second) : def;
+        };
+        auto getI = [&](const char* k, int def) -> int {
+            auto it = mc.params.find(k); return it != mc.params.end() ? std::stoi(it->second) : def;
+        };
+        auto getV4 = [&](const char* k, float4 def) -> float4 {
+            auto it = mc.params.find(k); return it != mc.params.end() ? parseVec4(it->second, def.w) : def;
+        };
+        auto getTex = [&](const char* k) -> int {
+            auto it = mc.params.find(k); return it != mc.params.end() ? resolveTextureName(it->second) : -1;
+        };
+
+        if (mc.type == "DIFFUSE") {
+            int baseTex = getTex("baseColorTex");
+            return baseTex >= 0 ? Material::DiffuseTextured(baseTex)
+                                 : Material::Diffuse(getV4("albedo", f4(0.8f, 0.8f, 0.8f, 1.0f)));
+        }
+        if (mc.type == "METAL")
+            return Material::Metal(getV4("eta", f4(1, 1, 1, 1)), getV4("k", f4(1, 1, 1, 1)), getF("roughness", 0.1f));
+        if (mc.type == "SMOOTH_DIELECTRIC")
+            return Material::SmoothDielectric(getF("ior", 1.5f), getV4("absorption", f4()), getI("priority", 0));
+        if (mc.type == "THIN_DIELECTRIC")
+            return Material::ThinDielectric(getF("ior", 1.5f), getV4("absorption", f4()), getI("priority", 0));
+        if (mc.type == "MICROFACET_DIELECTRIC")
+            return Material::MicrofacetDielectric(getF("ior", 1.5f), getF("roughness", 0.0f), getV4("k", f4()));
+        if (mc.type == "LEAF") {
+            int baseTex = getTex("baseColorTex"), transTex = getTex("transTex");
+            float ior = getF("ior", 1.5f), rough = getF("roughness", 0.7f), trans = getF("transmission", 0.05f);
+            float4 albedo = getV4("albedo", f4());
+            return transTex >= 0 ? Material::Leaf(baseTex, transTex, ior, rough, albedo, trans)
+                                  : Material::Leaf(baseTex, ior, rough, albedo, trans);
+        }
+        if (mc.type == "PRINCIPLED") {
+            Material m = Material::Principled(getV4("baseColor", f4(0.8f, 0.8f, 0.8f, 1.0f)),
+                                               getF("metallic", 0.0f), getF("roughness", 0.5f),
+                                               getTex("baseColorTex"), getTex("mrTex"));
+            m.normalTex    = getTex("normalTex");
+            m.emissiveTex  = getTex("emissiveTex");
+            m.occlusionTex = getTex("occlusionTex");
+            return m;
+        }
+        if (mc.type == "PRINCIPLED_GLASS")
+            return Material::PrincipledGlass(getF("ior", 1.5f), getV4("absorption", f4()), getI("priority", 0));
+        if (mc.type == "MIRROR" || mc.type == "DELTAMIRROR")
+            return Material::Mirror();
+
+        std::cerr << "SceneLoader::buildMaterialFromConfig: unknown material type '" << mc.type
+                  << "', using default Diffuse\n";
+        return Material::Diffuse(f4(0.8f));
+    }
 
     // Decode one glTF image (embedded bufferView or external URI) with stb into
     // imageCache_[i]. Each thread writes a distinct slot, so this is race-free.

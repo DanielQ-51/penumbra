@@ -7,6 +7,12 @@
 #include <sstream>
 #include <algorithm>
 #include <vector>
+#include <unordered_map>
+#include "material.cuh"
+
+#ifndef ROOT_DIR
+#define ROOT_DIR "."
+#endif
 
 __host__ inline std::string trim(const std::string& str) {
     size_t first = str.find_first_not_of(" \t\r\n");
@@ -22,10 +28,57 @@ __host__ inline float3 parseVec3(const std::string& val) {
     return v;
 }
 
+// Parses "(x,y,z)" or "(x,y,z,w)" — used by Materials: lines, where the vector
+// syntax needs commas (unlike parseVec3's bare-whitespace "x y z" convention,
+// which the Meshes:/Volumes: line grammar already relies on elsewhere).
+__host__ inline float4 parseVec4(const std::string& val, float defaultW = 0.0f) {
+    std::string s = trim(val);
+    if (!s.empty() && s.front() == '(') s.erase(s.begin());
+    if (!s.empty() && s.back() == ')') s.pop_back();
+    std::replace(s.begin(), s.end(), ',', ' ');
+    std::stringstream ss(s);
+    float x = 0.0f, y = 0.0f, z = 0.0f, w = defaultW;
+    ss >> x >> y >> z;
+    if (!(ss >> w)) w = defaultW;
+    return make_float4(x, y, z, w);
+}
+
 __host__ inline bool parseBool(const std::string& val) {
     std::string v = val;
     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
     return (v == "true");
+}
+
+__host__ inline TextureType parseTextureType(const std::string& val) {
+    if (val == "ALBEDO") return TEX_ALBEDO;
+    if (val == "METAL") return TEX_METAL;
+    if (val == "ROUGHNESS") return TEX_ROUGHNESS;
+    if (val == "EMISSION") return TEX_EMISSION;
+    if (val == "OCCLUSION") return TEX_OCCLUSION;
+    if (val == "TRANSMISSION") return TEX_TRANSMISSION;
+    if (val == "NORMAL") return TEX_NORMAL;
+    std::cerr << "parseTextureType: unknown texture type '" << val << "', defaulting to ALBEDO\n";
+    return TEX_ALBEDO;
+}
+
+// Splits a "key=value, key=value, ..." string on top-level commas only — commas
+// inside "(...)" (vector params like albedo=(0.4,0.4,0.8)) must not be split on.
+__host__ inline void parseKeyValueList(const std::string& s, std::unordered_map<std::string, std::string>& out) {
+    int depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= s.size(); i++) {
+        char c = (i < s.size()) ? s[i] : ',';
+        if (c == '(') depth++;
+        else if (c == ')') depth--;
+        else if (c == ',' && depth == 0) {
+            std::string piece = trim(s.substr(start, i - start));
+            start = i + 1;
+            if (piece.empty()) continue;
+            size_t eq = piece.find('=');
+            if (eq == std::string::npos) continue;
+            out[trim(piece.substr(0, eq))] = trim(piece.substr(eq + 1));
+        }
+    }
 }
 
 struct MeshConfig {
@@ -37,8 +90,25 @@ struct MeshConfig {
 
 struct GLTFConfig {
     std::string path;
-    uint32_t maxTextureDim;
-    float emissionScale;
+    uint32_t maxTextureDim = 2048;
+    float emissionScale = 1.0f;
+};
+
+// for non gltf textures
+struct TextureConfig {
+    std::string name; // referenced by Materials: lines' texture-slot fields
+    std::string path;
+    TextureType type;
+};
+
+// One Materials: line. Params are kept as raw text and typed/resolved later by
+// SceneLoader::buildMaterialFromConfig, which knows the Material:: factory methods
+// and can resolve texture-name references against the loaded texture table —
+// configParser.cuh itself stays free of Material-construction knowledge.
+struct MaterialConfig {
+    std::string type; // "DIFFUSE","METAL","SMOOTH_DIELECTRIC","THIN_DIELECTRIC",
+                       // "MICROFACET_DIELECTRIC","LEAF","PRINCIPLED","PRINCIPLED_GLASS","MIRROR"
+    std::unordered_map<std::string, std::string> params;
 };
 
 struct VolConfig {
@@ -89,11 +159,97 @@ struct RenderConfig {
     float camApeture = 0.0f;
     float camFocalDist = 0.0f;
 
+    // Environment map
+    std::string envMapPath;        // EnvMap: <path>, relative to ROOT_DIR
+    float envMapRotation = 0.0f;   // EnvMap Rotation: <degrees>, rotates around the Y-axis
+
     // Assets
     std::vector<MeshConfig> meshes;
     std::vector<GLTFConfig> gltfs;
     std::vector<VolConfig> volumes;
+    std::vector<TextureConfig> textures;
+    std::vector<MaterialConfig> materials;
+    std::string materialsFile; // MaterialsFile: <path> — optional shared Materials:/Textures: library
 };
+
+// Decodes one Textures: line — "name; type; path" — into a TextureConfig, shared
+// between loadConfig's own Textures: section and loadMaterialsLibrary below.
+__host__ inline void parseTextureLine(const std::string& line, std::vector<TextureConfig>& out) {
+    TextureConfig tex;
+    std::stringstream ss(line);
+    std::string seg;
+    if (std::getline(ss, seg, ';')) tex.name = trim(seg);
+    if (std::getline(ss, seg, ';')) tex.type = parseTextureType(trim(seg));
+    if (std::getline(ss, seg, ';')) tex.path = trim(seg);
+    out.push_back(tex);
+}
+
+// Decodes one Materials: line — "type; key=value, key=value, ..." — into a
+// MaterialConfig, shared between loadConfig's own Materials: section and
+// loadMaterialsLibrary below.
+__host__ inline void parseMaterialLine(const std::string& line, std::vector<MaterialConfig>& out) {
+    MaterialConfig mat;
+    std::stringstream ss(line);
+    std::string seg;
+    if (std::getline(ss, seg, ';')) mat.type = trim(seg);
+    if (std::getline(ss, seg, ';')) parseKeyValueList(trim(seg), mat.params);
+    out.push_back(mat);
+}
+
+// Loads a shared Materials:/Textures: library file, referenced via a scene
+// config's "MaterialsFile: <path>" directive. Deliberately recognizes ONLY
+// Materials:/Textures: sections (plus its own MaterialsFile: for one level of
+// chaining) — it must not honor scalar keys like "width:", or a shared library
+// could clobber the including scene's settings. Entries append to
+// config.materials/config.textures in file-scan order, so MeshConfig::materialID
+// keeps meaning "index into this list" regardless of whether entries came from a
+// library file or the scene file's own local sections.
+//
+// Path is resolved against ROOT_DIR directly (not the ASSET_PATH macro, which
+// isn't visible here — it's #define'd in main.cu/hostSetup.cuh AFTER their
+// #include of this file) so this doesn't depend on process CWD.
+__host__ inline bool loadMaterialsLibrary(const std::string& filepath, RenderConfig& config, int depth = 0) {
+    if (depth > 4) {
+        std::cerr << "loadMaterialsLibrary: MaterialsFile chain too deep at " << filepath << "\n";
+        return false;
+    }
+    std::string resolvedPath = std::string(ROOT_DIR) + "/" + filepath;
+    std::ifstream file(resolvedPath);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open materials library: " << resolvedPath << std::endl;
+        return false;
+    }
+
+    std::string line;
+    enum class LibSection { None, Materials, Textures };
+    LibSection section = LibSection::None;
+
+    while (std::getline(file, line)) {
+        line = trim(line);
+        if (line.empty()) continue;
+
+        // Same "MaterialsFile starts with Materials" ambiguity as loadConfig()
+        // above — must be checked before the section-header prefix match.
+        if (line.rfind("MaterialsFile", 0) == 0) {
+            size_t delimiterPos = line.find(':');
+            if (delimiterPos != std::string::npos) {
+                std::string value = trim(line.substr(delimiterPos + 1));
+                if (!value.empty()) loadMaterialsLibrary(value, config, depth + 1);
+            }
+            continue;
+        }
+
+        if (line.rfind("Materials", 0) == 0) { section = LibSection::Materials; continue; }
+        if (line.rfind("Textures", 0) == 0) { section = LibSection::Textures; continue; }
+
+        if (section == LibSection::Textures) {
+            parseTextureLine(line, config.textures);
+        } else if (section == LibSection::Materials) {
+            parseMaterialLine(line, config.materials);
+        }
+    }
+    return true;
+}
 
 __host__ inline bool loadConfig(const std::string& filepath, RenderConfig& config) {
     std::ifstream file(filepath);
@@ -104,7 +260,7 @@ __host__ inline bool loadConfig(const std::string& filepath, RenderConfig& confi
 
     std::string line;
 
-    enum class ParseSection { None, Meshes, GLTFs, Volumes };
+    enum class ParseSection { None, Meshes, GLTFs, Volumes, Materials, Textures };
     ParseSection section = ParseSection::None;
 
     while (std::getline(file, line)) {
@@ -125,6 +281,32 @@ __host__ inline bool loadConfig(const std::string& filepath, RenderConfig& confi
 
         if (line.rfind("Volumes", 0) == 0) {
             section = ParseSection::Volumes;
+            continue;
+        }
+
+        // MaterialsFile: <path> is a scalar directive, not a section header — must
+        // be checked before the "Materials" section-header prefix match below,
+        // since "MaterialsFile" itself starts with "Materials" and would otherwise
+        // be swallowed as a (bogus) section header.
+        if (line.rfind("MaterialsFile", 0) == 0) {
+            size_t delimiterPos = line.find(':');
+            if (delimiterPos != std::string::npos) {
+                std::string value = trim(line.substr(delimiterPos + 1));
+                if (!value.empty()) {
+                    config.materialsFile = value;
+                    loadMaterialsLibrary(value, config);
+                }
+            }
+            continue;
+        }
+
+        if (line.rfind("Materials", 0) == 0) {
+            section = ParseSection::Materials;
+            continue;
+        }
+
+        if (line.rfind("Textures", 0) == 0) {
+            section = ParseSection::Textures;
             continue;
         }
 
@@ -222,6 +404,10 @@ __host__ inline bool loadConfig(const std::string& filepath, RenderConfig& confi
             if(std::getline(ss, segment, ';')) vol.anisotropy = std::stof(trim(segment));
 
             config.volumes.push_back(vol);
+        } else if (section == ParseSection::Materials) {
+            parseMaterialLine(line, config.materials);
+        } else if (section == ParseSection::Textures) {
+            parseTextureLine(line, config.textures);
         }
         else {
             // Standard Key-Value Parsing
@@ -263,6 +449,8 @@ __host__ inline bool loadConfig(const std::string& filepath, RenderConfig& confi
             else if (key == "Camera FOV") config.camFov = std::stof(value);
             else if (key == "Camera Apeture") config.camApeture = std::stof(value);
             else if (key == "Camera FocalDist") config.camFocalDist = std::stof(value);
+            else if (key == "EnvMap") config.envMapPath = value;
+            else if (key == "EnvMap Rotation") config.envMapRotation = std::stof(value);
             else if (key == "VCM Merge Radius Power Factor") config.vcmMergeConst = std::stof(value);
             else if (key == "VCM Initial Merge Radius Multiplier") config.vcmInitialMergeRadiusMultiplier = std::stof(value);
         }

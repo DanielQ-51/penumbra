@@ -1,0 +1,49 @@
+Textures (name; type; path):
+tex_enkidu; ALBEDO; assets/textures/enkidutexture.bmp
+tex_enkiduChibi; ALBEDO; assets/textures/enkiduchibitexture.bmp
+tex_leaf; ALBEDO; assets/textures/leaftex2.bmp
+tex_leafAutumn; ALBEDO; assets/textures/leafautumn.bmp
+tex_wood; ALBEDO; assets/textures/wood.bmp
+tex_wall; ALBEDO; assets/textures/wall.bmp
+tex_glove; ALBEDO; assets/textures/Material.006_baseColor.bmp
+
+Materials (type; key=value, key=value, ...):
+SMOOTH_DIELECTRIC; ior=1.0, absorption=(0,0,0,0), priority=99
+DIFFUSE; albedo=(0.4,0.4,0.8,0)
+DIFFUSE; albedo=(0.9,0.9,0.9,0)
+DIFFUSE; albedo=(0.2,0.6,0.6,0)
+METAL; eta=(0.17,0.35,1.5,0), k=(0.17,0.35,1.5,0), roughness=0.05
+SMOOTH_DIELECTRIC; ior=1.5, absorption=(0,0,0,0), priority=1
+DIFFUSE; albedo=(0.90,0.1,0.1,0)
+METAL; eta=(0.14,0.16,0.13,0), k=(0.14,0.16,0.13,0), roughness=0.15
+SMOOTH_DIELECTRIC; ior=1.333, absorption=(0.45,3.75,7.49,0), priority=2
+SMOOTH_DIELECTRIC; ior=1.31, absorption=(0.2,0.2,0.2,0), priority=0
+SMOOTH_DIELECTRIC; ior=1.333, absorption=(0,0,0,0), priority=2
+DIFFUSE; baseColorTex=tex_enkidu
+DIFFUSE; baseColorTex=tex_enkiduChibi
+LEAF; baseColorTex=tex_leaf, ior=1.5, roughness=0.10, albedo=(0.22,0.75,0.28,0), transmission=0.15
+DIFFUSE; albedo=(0.90,0.9,0.83,0)
+DIFFUSE; albedo=(0.4,0.4,1.00,0)
+LEAF; baseColorTex=tex_leafAutumn, ior=1.5, roughness=0.8, albedo=(0.22,0.75,0.28,0), transmission=0.6
+DIFFUSE; albedo=(0.8,0.8,0.8,0)
+SMOOTH_DIELECTRIC; ior=2.42, absorption=(0,0,0,0), priority=1
+MIRROR;
+DIFFUSE; albedo=(0.0,0.0,0.0,0)
+DIFFUSE; albedo=(0.95,0.95,0.95,0)
+DIFFUSE; albedo=(0.5,0.5,0.5,0)
+DIFFUSE; albedo=(0.1,0.9,0.1,0)
+LEAF; baseColorTex=tex_wood, ior=1.5, roughness=0.3, albedo=(0,0,0,0), transmission=0.0
+DIFFUSE; albedo=(0.6,0.6,0.7,0)
+DIFFUSE; baseColorTex=tex_wall
+METAL; eta=(0.14,0.16,0.13,0), k=(0.14,0.16,0.13,0), roughness=0.35
+THIN_DIELECTRIC; ior=1.5
+METAL; eta=(0.14,0.16,0.13,0), k=(0.14,0.16,0.13,0), roughness=0.05
+METAL; eta=(0.14,0.16,0.13,0), k=(0.14,0.16,0.13,0), roughness=0.25
+METAL; eta=(0.17,0.35,1.5,0), k=(0.17,0.35,1.5,0), roughness=0.15
+DIFFUSE; albedo=(1.0,1.0,1.0,0)
+METAL; eta=(2.88,2.49,2.12,0), k=(3.05,2.97,2.76,0), roughness=0.15
+METAL; eta=(1.80,1.40,0.40,0), k=(2.10,2.80,4.20,0), roughness=0.35
+METAL; eta=(0.14,0.16,0.13,0), k=(4.1,2.3,3.1,0), roughness=0.45
+DIFFUSE; albedo=(0.03,0.03,0.03,0)
+LEAF; baseColorTex=tex_glove, ior=1.5, roughness=0.4, albedo=(0,0,0,0), transmission=0.0
+PRINCIPLED; baseColor=(1.0,1.0,1.0,0), metallic=0.0, roughness=0.15, baseColorTex=tex_wood

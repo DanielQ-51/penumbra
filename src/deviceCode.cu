@@ -30,7 +30,7 @@ __device__ __constant__ float3 sceneMin;
 __device__ __constant__ int w;
 __device__ __constant__ int h;
 
-__host__ void updateConstants(RenderConfig& config)
+__host__ void updateConstants(const RenderConfig& config)
 {
     cudaMemcpyToSymbol(BDPT_LIGHTTRACE, &config.bdptLightTrace, sizeof(bool));
     cudaMemcpyToSymbol(BDPT_NAIVE, &config.bdptNaive, sizeof(bool));

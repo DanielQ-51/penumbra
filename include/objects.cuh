@@ -461,6 +461,40 @@ struct Camera
         return true;
     }
 
+    // Like worldToRaster, but for a direction at infinite distance (e.g. an environment-map
+    // miss ray): no cameraOrigin subtraction, so this is rotation-only and immune to camera
+    // translation, which is exactly what an infinitely-far background needs.
+    __device__ __forceinline__ bool dirToRaster(const float3& dirWorld, float2& pixelPos) const
+    {
+        float3 fwd = getForwardVector();
+        float3 right = getRightVector();
+        float3 up = getUpVector();
+
+        float distZ = dot(dirWorld, fwd);
+
+        if (distZ <= 0.001f) return false;
+
+        float distX = dot(dirWorld, right);
+        float distY = dot(dirWorld, up);
+
+        float slopeX = distX / distZ;
+        float slopeY = distY / distZ;
+
+        float aspect = (float)w / (float)h;
+
+        float ndcX = slopeX / (aspect * fovScale);
+        float ndcY = slopeY / fovScale;
+
+        if (ndcX < -1.0f || ndcX > 1.0f || ndcY < -1.0f || ndcY > 1.0f) {
+            return false;
+        }
+
+        pixelPos.x = (ndcX + 1.0f) * 0.5f * (float)w;
+        pixelPos.y = (ndcY + 1.0f) * 0.5f * (float)h;
+
+        return true;
+    }
+
     __host__ __device__ __forceinline__ inline float getInitialRayFootprint() const
     {
         return atanf(fovScale / (float)h);

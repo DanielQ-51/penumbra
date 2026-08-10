@@ -20,36 +20,42 @@ struct __align__(32) LinearCameraAnimation {
         cam.preCompute();
     }
 };
-
-struct __align__(32) TurntableCameraAnimation {
+struct __align__(32) OrbitCameraAnimation {
     float3 target;        // Where the camera looks
-    float radius;         // Distance from target
+    float radius;         // Distance from target (spherical radius)
     float orbitSpeed;     // Radians per frame
-    float startAngle;     // Starting rotation
-    float height;
+    float startAngle;     // Starting horizontal rotation
+    float elevation;      // Vertical angle in radians (pitch)
     
-    TurntableCameraAnimation(float3 targetPos, float orbitRadius, float speedDeg, float startAngleDeg, float camHeight) 
-        : target(targetPos), radius(orbitRadius), height(camHeight) 
+    // Replaced 'camHeight' with 'elevationDeg'
+    OrbitCameraAnimation(float3 targetPos, float orbitRadius, float speedDeg, float startAngleDeg, float elevationDeg) 
+        : target(targetPos), radius(orbitRadius) 
     {
         orbitSpeed = speedDeg * (3.14159265f / 180.0f);
         startAngle = startAngleDeg * (3.14159265f / 180.0f);
+        elevation = elevationDeg * (3.14159265f / 180.0f);
     }
 
     __host__ void update(Camera& cam, uint32_t frame) {
+        // The horizontal rotation (azimuth)
         float angle = startAngle + (float)frame * orbitSpeed;
 
+        // Spherical coordinate math:
+        // Project the radius down onto the XZ plane based on the elevation.
+        // If elevation is 90 degrees (straight up), horizontalRadius becomes 0.
+        float horizontalRadius = radius * cosf(elevation);
+
         float3 pos = make_float3(
-            target.x + radius * cosf(angle),
-            height,
-            target.z + radius * sinf(angle)
+            target.x + horizontalRadius * cosf(angle),
+            target.y + radius * sinf(elevation),       // Y uses sin() to go up/down 
+            target.z + horizontalRadius * sinf(angle)
         );
 
         cam.cameraOrigin = pos;
 
         float3 dir = normalize(target - pos);
 
-        // FIXED: The negative signs correctly invert the Euler extraction
-        // so that your -Z forward vector correctly aligns with 'dir'
+        // Your existing Euler extraction works perfectly with this
         cam.yRot = atan2f(-dir.x, -dir.z); 
         cam.xRot = asinf(dir.y);
         cam.zRot = 0.0f;

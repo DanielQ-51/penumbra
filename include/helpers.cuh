@@ -745,7 +745,12 @@ __device__ inline bool sample(
             float v = rand_micro.z;
 
             float3 localPos = (1.0f - u) * apos + u * (1.0f - v) * bpos + u * v * cpos;
-            if (matrices)
+            // Guard on the id sentinel, not the pointer: buildFlattened bakes world-space
+            // geometry and tags lights with instanceID == 0xFFFFFFFF, yet the OptiX path
+            // now hands us a non-null (identity) matrix array for the closest-hit code.
+            // Testing `matrices` here would transform already-world verts with a garbage
+            // 0xFFFFFFFF*3 offset. Matches getData/getBarycentrics.
+            if (matrices && light.instanceID != 0xFFFFFFFF)
                 pos = transformPosition(matrices, light.instanceID, localPos);
             else
                 pos = localPos;
@@ -762,7 +767,7 @@ __device__ inline bool sample(
 
                 localNorm = (1.0f - u) * anorm + u * (1.0f - v) * bnorm + u * v * cnorm;
             }
-            if (matrices)
+            if (matrices && light.instanceID != 0xFFFFFFFF)
                 lightNorm = transformNormalRigid(matrices, light.instanceID, localNorm);
             else
                 lightNorm = normalize(localNorm);
@@ -848,7 +853,12 @@ __device__ inline bool sample_ReSTIR_rc_data(
             float v = rand_micro.z;
 
             float3 localPos = (1.0f - u) * apos + u * (1.0f - v) * bpos + u * v * cpos;
-            if (matrices)
+            // Guard on the id sentinel, not the pointer: buildFlattened bakes world-space
+            // geometry and tags lights with instanceID == 0xFFFFFFFF, yet the OptiX path
+            // now hands us a non-null (identity) matrix array for the closest-hit code.
+            // Testing `matrices` here would transform already-world verts with a garbage
+            // 0xFFFFFFFF*3 offset. Matches getData/getBarycentrics.
+            if (matrices && light.instanceID != 0xFFFFFFFF)
                 pos = transformPosition(matrices, light.instanceID, localPos);
             else
                 pos = localPos;
@@ -865,7 +875,7 @@ __device__ inline bool sample_ReSTIR_rc_data(
 
                 localNorm = (1.0f - u) * anorm + u * (1.0f - v) * bnorm + u * v * cnorm;
             }
-            if (matrices)
+            if (matrices && light.instanceID != 0xFFFFFFFF)
                 lightNorm = transformNormalRigid(matrices, light.instanceID, localNorm);
             else
                 lightNorm = normalize(localNorm);

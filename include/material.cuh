@@ -2,6 +2,16 @@
 
 #include "util.cuh"
 
+enum TextureType {
+    TEX_ALBEDO = 0,
+    TEX_METAL = 1,
+    TEX_ROUGHNESS = 2,
+    TEX_EMISSION = 3,
+    TEX_OCCLUSION = 4,
+    TEX_TRANSMISSION = 5,
+    TEX_NORMAL = 6
+};
+
 enum MaterialType {
     MAT_DIFFUSE = 0,
     MAT_METAL = 1,

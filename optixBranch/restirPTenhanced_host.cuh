@@ -148,7 +148,8 @@ __host__ void launch_restir (
 #if CAMERA_MOVES == 0 
     TurntableCameraAnimation animation = TurntableCameraAnimation(f3(0.0f, 0.0f, -1.5f), 6.5f, -0.0f, 90.0f, 0.0f);
 #else
-    //TurntableCameraAnimation animation = TurntableCameraAnimation(f3(0.0f, 0.0f, -1.5f), 6.5f, 0.66f, 90.0f, 0.0f);
+    //TurntableCameraAnimation animation = TurntableCameraAnimation(f3(0.0f, 0.0f, -1.5f), 6.5f, -0.36f, 90.0f, 0.0f);
+    OrbitCameraAnimation animation = OrbitCameraAnimation(f3(0.0f, 0.5f, 0.0f), 2.5f, -0.5f, 90.0f, 15.0f);
 #endif
     //LinearCameraAnimation animation = LinearCameraAnimation(commonParams.camera.cameraOrigin, f3(commonParams.camera.xRot, commonParams.camera.yRot, commonParams.camera.zRot), f3(0.00f, 0.02f, 0.0f) ,f3());
     
@@ -161,7 +162,7 @@ __host__ void launch_restir (
     float3 rotDelta = make_float3(-0.001118f, 0.00f, 0.00f);
 
     
-    LinearCameraAnimation animation = LinearCameraAnimation(
+    LinearCameraAnimation animation1 = LinearCameraAnimation(
         startOrigin,
         startRotation,
         posDelta,
