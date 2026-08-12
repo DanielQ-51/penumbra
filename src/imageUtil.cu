@@ -381,3 +381,154 @@ __global__ void cleanAndFormatImageNoOverlay(
 
     outputBuffer[pixelIndex] = finalColor;
 }
+
+__constant__ float c_aces_input_matrix[9] = {
+    0.59719f, 0.35458f, 0.04823f,
+    0.07600f, 0.90834f, 0.01566f,
+    0.02840f, 0.13383f, 0.83777f
+};
+
+__constant__ float c_aces_output_matrix[9] = {
+     1.60475f, -0.53108f, -0.07367f,
+    -0.10208f,  1.10813f, -0.00605f,
+    -0.00327f, -0.07276f,  1.07602f
+};
+
+__device__ float3 mul_mat3(const float matrix[9], const float3& v) {
+    return make_float3(
+        matrix[0] * v.x + matrix[1] * v.y + matrix[2] * v.z,
+        matrix[3] * v.x + matrix[4] * v.y + matrix[5] * v.z,
+        matrix[6] * v.x + matrix[7] * v.y + matrix[8] * v.z
+    );
+}
+
+__device__ float3 rtt_and_odt_fit(float3 v) {
+    float3 a = make_float3(
+        v.x * (v.x + 0.0245786f) - 0.000090537f,
+        v.y * (v.y + 0.0245786f) - 0.000090537f,
+        v.z * (v.z + 0.0245786f) - 0.000090537f
+    );
+    float3 b = make_float3(
+        v.x * (0.983729f * v.x + 0.4329510f) + 0.238081f,
+        v.y * (0.983729f * v.y + 0.4329510f) + 0.238081f,
+        v.z * (0.983729f * v.z + 0.4329510f) + 0.238081f
+    );
+    return make_float3(a.x / b.x, a.y / b.y, a.z / b.z);
+}
+
+__device__ float3 device_aces_fitted(float3 c) {
+    c = mul_mat3(c_aces_input_matrix, c);
+    c = rtt_and_odt_fit(c);
+    c = mul_mat3(c_aces_output_matrix, c);
+    return c;
+}
+
+__device__ float3 device_toneMap(float3 c) {
+    const float A = 2.51f;
+    const float B = 0.03f;
+    const float C = 2.43f;
+    const float D = 0.59f;
+    const float E = 0.14f;
+
+    float3 num = make_float3(
+        c.x * (A * c.x + B),
+        c.y * (A * c.y + B),
+        c.z * (A * c.z + B)
+    );
+    float3 den = make_float3(
+        c.x * (C * c.x + D) + E,
+        c.y * (C * c.y + D) + E,
+        c.z * (C * c.z + D) + E
+    );
+    
+    // clamp to 0-1
+    return make_float3(
+        fminf(fmaxf(num.x / den.x, 0.0f), 1.0f),
+        fminf(fmaxf(num.y / den.y, 0.0f), 1.0f),
+        fminf(fmaxf(num.z / den.z, 0.0f), 1.0f)
+    );
+}
+
+__device__ float3 device_gammaCorrect(float3 c) {
+    float invGamma = 1.0f / 2.2f;
+    return make_float3(powf(c.x, invGamma), powf(c.y, invGamma), powf(c.z, invGamma));
+}
+
+__global__ void cleanFormatAndPostProcessImage(
+    float4* accumulationBuffer, 
+    float4* overlayBuffer,      
+    float4* outputBuffer,       
+    int w, int h, 
+    int currentSampleCount,
+    float exposure,
+    bool use_fitted_aces) 
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idy = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (idx >= w || idy >= h) return;
+    int pixelIndex = idy * w + idx;
+
+    float4 acc = accumulationBuffer[pixelIndex];
+    float3 color;
+
+    // 1. Check for NaNs/Infs
+    if (isnan(acc.x) || isnan(acc.y) || isnan(acc.z)) {
+        color = make_float3(1.0f, 0.0f, 1.0f);
+    } 
+    else if (isinf(acc.x) || isinf(acc.y) || isinf(acc.z)) {
+        color = make_float3(0.0f, 1.0f, 0.0f);
+    } 
+    else if (acc.x < 0 || acc.y < 0 || acc.z < 0) {
+        color = make_float3(0.0f, 0.0f, 1.0f);
+    } 
+    else {
+        // 2. Normalize
+        float scale = 1.0f / (float)(currentSampleCount + 1);
+        color = make_float3(acc.x * scale, acc.y * scale, acc.z * scale);
+        
+        // 3. Post-Process (Exposure -> ToneMap -> Gamma)
+        color = make_float3(color.x * exposure, color.y * exposure, color.z * exposure);
+        
+        if (use_fitted_aces) {
+            color = device_aces_fitted(color);
+        } else {
+            color = device_toneMap(color);
+        }
+        
+        color = device_gammaCorrect(color);
+    }
+
+    // 4. Overlay logic (Overwrites everything if present)
+    if (overlayBuffer != nullptr) {
+        float4 ov = overlayBuffer[pixelIndex];
+        if (ov.x != 0.0f || ov.y != 0.0f || ov.z != 0.0f) {
+            color = make_float3(ov.x, ov.y, ov.z);
+        }
+    }
+
+    // Write final processed float4 to buffer
+    outputBuffer[pixelIndex] = make_float4(color.x, color.y, color.z, 1.0f);
+}
+
+__global__ void postProcessOnly(
+    float4* inputBuffer,
+    float4* outputBuffer,
+    int w, int h,
+    float exposure,
+    bool use_fitted_aces)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idy = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (idx >= w || idy >= h) return;
+    int pixelIndex = idy * w + idx;
+
+    float4 c = inputBuffer[pixelIndex];
+    float3 color = make_float3(c.x * exposure, c.y * exposure, c.z * exposure);
+
+    color = use_fitted_aces ? device_aces_fitted(color) : device_toneMap(color);
+    color = device_gammaCorrect(color);
+
+    outputBuffer[pixelIndex] = make_float4(color.x, color.y, color.z, 1.0f);
+}

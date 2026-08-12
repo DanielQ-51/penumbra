@@ -1290,6 +1290,82 @@ __device__ inline void sample_f_eval_lobe(RNGState& localState, const Material* 
 #endif
 }
 
+__device__ inline void sample_f_eval_lobe_returnRoughness(RNGState& localState, const Material* __restrict__ materials, int materialID, const TextureView& textures,
+    const float3& wi, float etaI, float etaT, bool backface, float3& wo, float3& f_val, float& pdf, float& pdf_marg, const float2 uv,
+    float& rough, int transportMode = TRANSPORTMODE_RADIANCE, float lod = 0.0f)
+{
+    // pdf      = lobe-specific generation pdf (p_total) -> use for throughput and Jacobians.
+    // pdf_marg = fully marginalized bsdf pdf of `wo`    -> use STRICTLY for MIS weights.
+    // They are equal for every single-lobe material; they differ only for the
+    // multi-lobe principled BSDF, where the marginal is filled below.
+#if LOBE_SPECIFIC_BSDF
+    const Material& mat = materials[materialID];
+    float3 albedo = f3(mat.albedo);
+    if (mat.baseColorTex >= 0)
+        albedo = f3(sampleTex(textures, mat.baseColorTex, uv, lod));
+
+    float trans = mat.transmission;
+    if (mat.transTex >= 0)
+        trans = sampleTex(textures, mat.transTex, uv, lod).x;
+
+    pdf_marg = -1.0f; // <0 sentinel: overwritten only by the multi-lobe principled path
+
+    rough = mat.roughness;
+
+    if (mat.type == MAT_DIFFUSE)
+    {
+        cosine_sample_f(localState, albedo, wo, f_val, pdf);
+    }
+    else if (mat.type == MAT_METAL)
+    {
+        microfacet_metal_sample_f(localState, f3(mat.eta), f3(mat.k), mat.roughness, -wi, wo, f_val, pdf);
+    }
+    else if (mat.type == MAT_SMOOTHDIELECTRIC)
+    {
+        dumb_smooth_dielectric_sample_f(localState, -wi, mat.ior, backface, transportMode, wo, f_val, pdf);
+    }
+    else if (mat.type == MAT_LEAF)
+    {
+        leaf_sample_f(localState, -wi, mat.ior, etaI, mat.roughness, albedo, trans, wo, f_val, pdf);
+    }
+    else if (mat.type == MAT_DELTAMIRROR)
+    {
+        mirror_sample_f(-wi, wo, f_val, pdf);
+    }
+    else if (mat.type == MAT_THINDIELECTRIC)
+    {
+        thin_dielectric_sample_f(localState, -wi, mat.ior, backface, transportMode, wo, f_val, pdf);
+    }
+    else if (mat.type == MAT_MICROFACETDIELECTRIC)
+    {
+        microfacet_dielectric_sample_f(localState, -wi, mat.ior, mat.roughness, backface, transportMode, wo, f_val, pdf);
+    }
+    else if (mat.type == MAT_GLTF_PRINCIPLED_BSDF)
+    {
+        if (mat.isSpecular)
+        {
+            dumb_smooth_dielectric_sample_f(localState, -wi, mat.ior, backface, transportMode, wo, f_val, pdf);
+        }
+        else
+        {
+            float metallic = mat.metallic;
+            if (mat.mrTex >= 0) {
+                float4 mr = sampleTex(textures, mat.mrTex, uv, lod);
+                rough *= mr.y;
+                metallic  *= mr.z;
+            }
+            principled_sample_f_lobe(localState, albedo, metallic, rough, -wi, wo, f_val, pdf);
+            principled_pdf(albedo, metallic, rough, -wi, wo, pdf_marg); // marginal, for MIS only
+        }
+    }
+
+    if (pdf_marg < 0.0f) pdf_marg = pdf; // single-lobe materials: marginal == sampling pdf
+#else
+    sample_f_eval(localState, materials, materialID, textures, wi, etaI, etaT, backface, wo, f_val, pdf, uv, transportMode, lod);
+    pdf_marg = pdf;
+#endif
+}
+
 // Replay-and-evaluate for a reconnection endpoint. `wo` is fixed by the reconnection
 // geometry. This rolls the SAME rng sequence sample_f_eval would have consumed for
 // this material -- the lobe-selection draw reconstructs the lobe the base path used,

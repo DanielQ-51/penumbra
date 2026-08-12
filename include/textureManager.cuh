@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include <cuda.h> // Driver API needed for Block Compressed formats
 #include <vector>
 #include <string>
 #include <iostream>
@@ -14,6 +15,43 @@
 enum TexColorSpace {
     TEX_LINEAR = 0, // metallic-roughness, occlusion, normal maps  (raw data)
     TEX_SRGB   = 1  // baseColor, emissive                         (color)
+};
+
+// DDS Header structures for our lightweight parser
+struct DDS_PIXELFORMAT {
+    uint32_t size;
+    uint32_t flags;
+    uint32_t fourCC;
+    uint32_t RGBBitCount;
+    uint32_t RBitMask;
+    uint32_t GBitMask;
+    uint32_t BBitMask;
+    uint32_t ABitMask;
+};
+
+struct DDS_HEADER {
+    uint32_t size;
+    uint32_t flags;
+    uint32_t height;
+    uint32_t width;
+    uint32_t pitchOrLinearSize;
+    uint32_t depth;
+    uint32_t mipMapCount;
+    uint32_t reserved1[11];
+    DDS_PIXELFORMAT ddspf;
+    uint32_t caps;
+    uint32_t caps2;
+    uint32_t caps3;
+    uint32_t caps4;
+    uint32_t reserved2;
+};
+
+struct DDS_HEADER_DXT10 {
+    uint32_t dxgiFormat;
+    uint32_t resourceDimension;
+    uint32_t miscFlag;
+    uint32_t arraySize;
+    uint32_t miscFlags2;
 };
 
 class TextureManager {
@@ -153,6 +191,127 @@ public:
         texObjects.push_back(obj);
         texDims.push_back(make_int2(w, h)); // w,h are the final level-0 dims (post-cap)
         dirty = true;
+        return (int)texObjects.size() - 1;
+    }
+
+    // Parses raw BC7 DDS bytes, limits resolution via mip-skipping, and uploads directly via Driver API.
+    int addFromDDS(const unsigned char* ddsData, size_t dataSize, TexColorSpace cs)
+    {
+        if (!ddsData || dataSize < 148) return -1; // Too small to contain headers
+
+        uint32_t magic = *(uint32_t*)ddsData;
+        if (magic != 0x20534444) { // "DDS "
+            std::cerr << "TextureManager: Invalid DDS magic number.\n";
+            return -1;
+        }
+
+        const DDS_HEADER* header = (const DDS_HEADER*)(ddsData + 4);
+        int w = header->width;
+        int h = header->height;
+        int mips = header->mipMapCount > 0 ? header->mipMapCount : 1;
+
+        bool isDX10 = (header->ddspf.fourCC == 0x30315844); // "DX10"
+        if (!isDX10) {
+            std::cerr << "TextureManager: Only DX10 extended header DDS files (BC7) are supported.\n";
+            return -1;
+        }
+
+        const DDS_HEADER_DXT10* dx10Header = (const DDS_HEADER_DXT10*)(ddsData + 4 + 124);
+        
+        // 98 = DXGI_FORMAT_BC7_UNORM, 99 = DXGI_FORMAT_BC7_UNORM_SRGB
+        if (dx10Header->dxgiFormat != 98 && dx10Header->dxgiFormat != 99) {
+            std::cerr << "TextureManager: Only BC7 format is supported via DDS fast-path.\n";
+            return -1;
+        }
+
+        size_t dataOffset = 4 + 124 + 20; // Magic + Header + DX10 Header
+        const unsigned char* mipData = ddsData + dataOffset;
+
+        int curW = w;
+        int curH = h;
+        int skipMips = 0;
+
+        // Resolution Cap: Since we can't easily downsample BC7 blocks on the CPU,
+        // we just skip the highest resolution mipmaps in the file until it fits maxDim_
+        while ((curW > maxDim_ || curH > maxDim_) && skipMips < mips - 1) {
+            int blocksW = (curW + 3) / 4;
+            int blocksH = (curH + 3) / 4;
+            mipData += blocksW * blocksH * 16; // BC7 is 16 bytes per block
+            
+            curW = std::max(1, curW / 2);
+            curH = std::max(1, curH / 2);
+            skipMips++;
+        }
+
+        int uploadMips = mips - skipMips;
+
+        // Allocate using CUDA Driver API (Required for Block Compressed formats)
+        CUDA_ARRAY3D_DESCRIPTOR desc = {};
+        desc.Width = curW;
+        desc.Height = curH;
+        desc.Depth = 0;
+        // Assign correct format. If the scene wants sRGB, enforce it. 
+        desc.Format = (cs == TEX_SRGB) ? CU_AD_FORMAT_BC7_UNORM_SRGB : CU_AD_FORMAT_BC7_UNORM;
+        desc.NumChannels = 4;
+        desc.Flags = 0;
+
+        CUmipmappedArray cuMipArray;
+        cuMipmappedArrayCreate(&cuMipArray, &desc, uploadMips);
+
+        // Upload the remaining mip levels
+        int mipW = curW, mipH = curH;
+        for (int i = 0; i < uploadMips; ++i) {
+            CUarray cuLevel;
+            cuMipmappedArrayGetLevel(&cuLevel, cuMipArray, i);
+            
+            int blocksW = (mipW + 3) / 4;
+            int blocksH = (mipH + 3) / 4;
+            size_t mipBytes = blocksW * blocksH * 16;
+            
+            CUDA_MEMCPY3D copyParams = {};
+            copyParams.srcMemoryType = CU_MEMORYTYPE_HOST;
+            copyParams.srcHost = mipData;
+            copyParams.srcPitch = blocksW * 16;
+            
+            copyParams.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+            copyParams.dstArray = cuLevel;
+            
+            copyParams.WidthInBytes = blocksW * 16;
+            copyParams.Height = blocksH;
+            copyParams.Depth = 1;
+            
+            cuMemcpy3D(&copyParams);
+            
+            mipData += mipBytes;
+            mipW = std::max(1, mipW / 2);
+            mipH = std::max(1, mipH / 2);
+        }
+
+        // Bridge Driver API CUmipmappedArray to Runtime API cudaMipmappedArray_t
+        cudaMipmappedArray_t rtMipArray = (cudaMipmappedArray_t)cuMipArray;
+
+        cudaResourceDesc resDesc = {};
+        resDesc.resType = cudaResourceTypeMipmappedArray;
+        resDesc.res.mipmap.mipmap = rtMipArray;
+
+        cudaTextureDesc texDesc = {};
+        texDesc.normalizedCoords   = 1;
+        texDesc.filterMode         = cudaFilterModeLinear;
+        texDesc.mipmapFilterMode   = cudaFilterModeLinear;
+        texDesc.readMode           = cudaReadModeNormalizedFloat;
+        texDesc.addressMode[0]     = cudaAddressModeWrap;
+        texDesc.addressMode[1]     = cudaAddressModeWrap;
+        texDesc.sRGB               = (cs == TEX_SRGB) ? 1 : 0;
+        texDesc.maxMipmapLevelClamp = (float)(uploadMips - 1);
+
+        cudaTextureObject_t obj = 0;
+        cudaCreateTextureObject(&obj, &resDesc, &texDesc, nullptr);
+
+        mipArrays.push_back(rtMipArray);
+        texObjects.push_back(obj);
+        texDims.push_back(make_int2(curW, curH));
+        dirty = true;
+        
         return (int)texObjects.size() - 1;
     }
 

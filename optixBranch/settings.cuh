@@ -39,7 +39,7 @@
 #endif
 
 #ifndef DEBUG_VISUALIZE_TYPE
-#define DEBUG_VISUALIZE_TYPE 1
+#define DEBUG_VISUALIZE_TYPE 0
 #endif
 
 #ifndef TEMPORAL_SKIP_REVERSE_SHIFT
@@ -58,12 +58,6 @@
 #define RECON_FOOTPRINT_C_CONSTANT 0.02f
 #endif
 
-// ---------------------------------------------------------------------------
-// Ray-cone texture LOD (mip selection for the ReSTIR PT integrator). The base
-// per-triangle term Delta is baked at load time (Triangle::lodDelta); at each
-// hit the LOD is  Delta + log2(coneWidth / |n.d|) + RAYCONE_LOD_BIAS.
-// ---------------------------------------------------------------------------
-
 // Master enable. 0 = every texture read stays at mip 0 (original behavior); the
 // cone registers still compile but getDataGeoLOD returns lod = 0.
 #ifndef USE_RAY_CONES
@@ -79,7 +73,7 @@
 // How fast the cone widens per bounce, scaled by surface roughness. Larger =
 // secondary/GI bounces defocus onto coarser mips sooner (cheaper, less noise).
 #ifndef RAYCONE_ROUGHNESS_SPREAD
-#define RAYCONE_ROUGHNESS_SPREAD 0.20f
+#define RAYCONE_ROUGHNESS_SPREAD 0.40f
 #endif
 
 #ifndef DEBUG_TEST_PIXEL_X
@@ -101,7 +95,7 @@
 // Run the OptiX denoiser (HDR model, albedo + geometric-normal guides) on the
 // reconstructed linear-HDR frame before tone-mapping. 0 = save the raw noisy frame.
 #ifndef USE_DENOISER
-#define USE_DENOISER 0
+#define USE_DENOISER 1
 #endif
 
 #ifndef TEMPORAL_USE_DUAL_MV

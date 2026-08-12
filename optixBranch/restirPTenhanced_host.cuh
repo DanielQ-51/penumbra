@@ -22,6 +22,7 @@ __host__ void launch_restir (
     CommonParams commonParams,
     uint32_t frameCount
 ) {
+    commonParams.camera.antiAliasJitterDist = 1.0f;
     Reservoir reservoir1, reservoir2;
     GBuffer gbuffer1;
     GBuffer gbuffer2;
@@ -149,7 +150,7 @@ __host__ void launch_restir (
     TurntableCameraAnimation animation = TurntableCameraAnimation(f3(0.0f, 0.0f, -1.5f), 6.5f, -0.0f, 90.0f, 0.0f);
 #else
     //TurntableCameraAnimation animation = TurntableCameraAnimation(f3(0.0f, 0.0f, -1.5f), 6.5f, -0.36f, 90.0f, 0.0f);
-    OrbitCameraAnimation animation = OrbitCameraAnimation(f3(0.0f, 0.5f, 0.0f), 2.5f, -0.5f, 90.0f, 15.0f);
+    //OrbitCameraAnimation animation = OrbitCameraAnimation(f3(0.0f, 1.0f, 0.0f), 2.5f, -0.5f, 90.0f, -20.0f);
 #endif
     //LinearCameraAnimation animation = LinearCameraAnimation(commonParams.camera.cameraOrigin, f3(commonParams.camera.xRot, commonParams.camera.yRot, commonParams.camera.zRot), f3(0.00f, 0.02f, 0.0f) ,f3());
     
@@ -162,7 +163,7 @@ __host__ void launch_restir (
     float3 rotDelta = make_float3(-0.001118f, 0.00f, 0.00f);
 
     
-    LinearCameraAnimation animation1 = LinearCameraAnimation(
+    LinearCameraAnimation animation = LinearCameraAnimation(
         startOrigin,
         startRotation,
         posDelta,
@@ -175,6 +176,15 @@ __host__ void launch_restir (
     dim3 gridSize((commonParams.w+31)/32, (commonParams.h+7)/8);
     
     Image image = Image(commonParams.w, commonParams.h);
+#if DEBUG_VISUALIZE_TYPE == 1
+    image.postProcess = false;
+#endif
+    // Post-processing (exposure/tonemap/gamma) now happens in the
+    // cleanFormatAndPostProcessImage kernel below rather than on the host.
+    // Capture the decision once and disable Image::postProcess so
+    // saveImageBMP() doesn't re-apply it on top of the already-processed data.
+    const bool gpuPostProcess = image.postProcess;
+    image.postProcess = false;
     float4* d_finalOutput;
     cudaMalloc(&d_finalOutput, commonParams.w * commonParams.h * sizeof(float4));
     cudaMemset(d_finalOutput, 0, commonParams.w * commonParams.h * sizeof(float4));
@@ -209,6 +219,10 @@ __host__ void launch_restir (
     cudaMalloc(reinterpret_cast<void**>(&d_pt_params), sizeof(PipelineParams));
 
     Image ptImage = Image(commonParams.w, commonParams.h);
+    // Post-processing now happens in the cleanFormatAndPostProcessImage kernel
+    // below rather than on the host; disable Image::postProcess so
+    // saveImageBMP() doesn't re-apply it on top of the already-processed data.
+    ptImage.postProcess = false;
 
     // Pinned ring of per-sample launch params (identical except the RNG seed).
     // Pinned memory + distinct slots let the PT loop fire its sample launches as
@@ -388,8 +402,9 @@ __host__ void launch_restir (
         cudaEventElapsedTime(&ptElapsed, ptStart, ptNow);
 
         // Divisor is currentSampleCount + 1, so pass ptSamples - 1 to divide by ptSamples.
-        cleanAndFormatImageNoOverlay<<<gridSize, blockSize, 0, stream>>>(
-            d_pt_accum, d_pt_final, commonParams.w, commonParams.h, ptSamples - 1
+        cleanFormatAndPostProcessImage<<<gridSize, blockSize, 0, stream>>>(
+            d_pt_accum, nullptr, d_pt_final, commonParams.w, commonParams.h, ptSamples - 1,
+            2.0f, true
         );
         cudaMemcpyAsync(host_colors, d_pt_final,
                         commonParams.w * commonParams.h * sizeof(float4),
@@ -411,6 +426,9 @@ __host__ void launch_restir (
 
 #if SAVE_SEQUENCE == 1
 
+        // Always normalize to linear HDR here — tonemapping (if any) happens
+        // further down, after denoising, so the denoiser never sees
+        // gamma-corrected/tonemapped data.
 #if ACCUMULATE_FRAMES == 1
         cleanAndFormatImage<<<gridSize, blockSize, 0, stream>>>(
             allParams.common.accum_buffer, allParams.common.overlay_buffer, d_finalOutput, commonParams.w, commonParams.h, frame
@@ -451,9 +469,25 @@ __host__ void launch_restir (
                 &guideLayer, &layer, 1, 0, 0,
                 d_denoiserScratch, dsizes.withoutOverlapScratchSizeInBytes);
         }
-        cudaMemcpyAsync(host_colors, d_denoiseOut, commonParams.w * commonParams.h * sizeof(float4), cudaMemcpyDeviceToHost, stream);
         { float4* tmp = d_denoiseOut; d_denoiseOut = d_denoisePrev; d_denoisePrev = tmp; } // this frame's output -> next frame's history
+        // Tonemap/gamma only now, after denoising, on the linear denoised
+        // result (now in d_denoisePrev post-swap). Write into d_finalOutput
+        // (no longer needed as linear data) rather than in place, so the
+        // buffer kept for next frame's temporal history stays linear.
+        if (gpuPostProcess) {
+            postProcessOnly<<<gridSize, blockSize, 0, stream>>>(
+                d_denoisePrev, d_finalOutput, commonParams.w, commonParams.h, 2.0f, true
+            );
+            cudaMemcpyAsync(host_colors, d_finalOutput, commonParams.w * commonParams.h * sizeof(float4), cudaMemcpyDeviceToHost, stream);
+        } else {
+            cudaMemcpyAsync(host_colors, d_denoisePrev, commonParams.w * commonParams.h * sizeof(float4), cudaMemcpyDeviceToHost, stream);
+        }
 #else
+        if (gpuPostProcess) {
+            postProcessOnly<<<gridSize, blockSize, 0, stream>>>(
+                d_finalOutput, d_finalOutput, commonParams.w, commonParams.h, 2.0f, true
+            );
+        }
         cudaMemcpyAsync(host_colors, d_finalOutput, commonParams.w * commonParams.h * sizeof(float4), cudaMemcpyDeviceToHost, stream);
 #endif
         cudaStreamSynchronize(stream);

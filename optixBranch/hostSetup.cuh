@@ -524,7 +524,12 @@ int initRender(OptixEngineState& engineState, string configPath, int renderNumbe
     camera.preCompute();
 
     Image image = Image(w, h);
-    image.postProcess = config.postProcess;
+    // Post-processing (exposure/tonemap/gamma) now happens on the GPU via
+    // cleanAndFormatImageNoOverlay + postProcessOnly below rather than on
+    // the host. Capture the decision once and disable Image::postProcess so
+    // saveImageBMP() doesn't re-apply it on top of the already-processed data.
+    const bool gpuPostProcess = config.postProcess;
+    image.postProcess = false;
 
     if (integratorChoice == OPTIX_NORMAL)
     {
@@ -692,17 +697,28 @@ int initRender(OptixEngineState& engineState, string configPath, int renderNumbe
     } else {
         printf("Error: Integrator Unavaible in Optix Branch");
     }
-    
 
+    // Normalize (divide by sampleCount) on the GPU. No overlay buffer in
+    // this pipeline, so the NoOverlay variant. Divisor is
+    // currentSampleCount + 1, so pass sampleCount - 1 to divide by sampleCount.
+    cleanAndFormatImageNoOverlay<<<gridSize, blockSize, 0, stream>>>(
+        out_colors, d_finalOutput, w, h, sampleCount - 1
+    );
 
-    
-    cudaMemcpy(host_colors, out_colors, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
+    if (gpuPostProcess) {
+        postProcessOnly<<<gridSize, blockSize, 0, stream>>>(
+            d_finalOutput, d_finalOutput, w, h, 2.0f, image.use_fitted_aces
+        );
+    }
+
+    cudaMemcpyAsync(host_colors, d_finalOutput, w * h * sizeof(float4), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
 
     for (int i = 0; i < w; i++)
     {
         for (int j = 0; j < h; j++)
         {
-            image.setColor(i, j, host_colors[image.toIndex(i, j)]/sampleCount);
+            image.setColor(i, j, host_colors[image.toIndex(i, j)]);
         }
     }
 

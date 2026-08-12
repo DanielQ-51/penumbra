@@ -47,3 +47,26 @@ __global__ void cleanAndFormatImageNoOverlay(
     float4* outputBuffer,       // A temporary buffer to store the result for saving
     int w, int h, 
     int currentSampleCount);
+
+__global__ void cleanFormatAndPostProcessImage(
+    float4* accumulationBuffer,
+    float4* overlayBuffer,
+    float4* outputBuffer,
+    int w, int h,
+    int currentSampleCount,
+    float exposure,
+    bool use_fitted_aces);
+
+// Applies exposure/tonemap/gamma to an already-normalized linear buffer
+// (e.g. post-denoise output), writing into a separate output buffer so the
+// linear input (which may be reused as next frame's denoiser history) is
+// left untouched. inputBuffer == outputBuffer is fine when the input has no
+// further use. Kept separate from cleanFormatAndPostProcessImage so
+// denoising can happen on linear data, with tonemapping applied only
+// afterward.
+__global__ void postProcessOnly(
+    float4* inputBuffer,
+    float4* outputBuffer,
+    int w, int h,
+    float exposure,
+    bool use_fitted_aces);

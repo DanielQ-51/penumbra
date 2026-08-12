@@ -152,10 +152,6 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
     float2 currPixelPos = make_float2((float)x + __half2float(jitter.x), (float)y + __half2float(jitter.y));
     float2 lastPixelPos;
 
-    // Temporal-denoiser flow, in pixels. Empirically OptiX wants (curr - prev) here
-    // (== our gbuffer MV); the (prev - curr) the docs suggest smears flat surfaces
-    // under motion. If ghosting reappears, flip this back to lastPixelPos-currPixelPos.
-    // Zero on frame 0 (no history; gated by temporalModeUsePreviousLayers).
     float2 denoiserFlow = f2(0.0f);
     if (params.frame_index != 0) {
         restir.lastFrameCamera.worldToRaster(shadingPos, lastPixelPos);
@@ -321,8 +317,9 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
     float3 f_val_bsdf;
     float pdf_bsdf;
     float pdf_bsdf_marg;
+    float rough;
 
-    sample_f_eval_lobe(
+    sample_f_eval_lobe_returnRoughness(
         localState,
         params.shadeContext.materials,
         materialID,
@@ -336,9 +333,14 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         pdf_bsdf,
         pdf_bsdf_marg,
         uv,
+        rough,
         TRANSPORTMODE_RADIANCE,
         lod
     );
+
+    #if USE_RAY_CONES
+        coneSpread += RAYCONE_ROUGHNESS_SPREAD * rough;
+    #endif
 
     if (pdf_bsdf < EPSILON)
     {
@@ -355,12 +357,6 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
 
     throughput *= f_val_bsdf * fabsf(outgoing.z) / pdf_bsdf;
     lastCosine = fabsf(outgoing.z);
-
-    // This surface's contribution to the cone spread for the NEXT segment (rougher
-    // surfaces defocus the cone faster; ~0 for mirrors, so specular stays sharp).
-#if USE_RAY_CONES
-    coneSpread += RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
-#endif
 
     toWorld(outgoing, normal, outgoing);
 
@@ -505,8 +501,9 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         float3 f_val_bsdf;
         float pdf_bsdf;
         float pdf_bsdf_marg;
+        float rough;
 
-        sample_f_eval_lobe(
+        sample_f_eval_lobe_returnRoughness(
             localState,
             params.shadeContext.materials,
             materialID,
@@ -520,6 +517,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
             pdf_bsdf,
             pdf_bsdf_marg,
             uv,
+            rough,
             TRANSPORTMODE_RADIANCE,
             lod
         );
@@ -793,7 +791,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
 
         // This surface's contribution to the cone spread for the next segment.
 #if USE_RAY_CONES
-        coneSpread += RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
+        coneSpread += RAYCONE_ROUGHNESS_SPREAD * rough;
 #endif
         #if DEBUG_MODE == 1
         lastPOS_GETRIDOFME = shadingPos;

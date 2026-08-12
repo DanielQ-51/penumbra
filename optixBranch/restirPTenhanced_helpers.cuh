@@ -153,8 +153,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         float3 f_val_bsdf;
         float pdf_bsdf;
         float pdf_bsdf_marg;
+        float rough;
 
-        sample_f_eval_lobe(
+        sample_f_eval_lobe_returnRoughness(
             localState,
             params.shadeContext.materials,
             materialID,
@@ -168,9 +169,13 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             pdf_bsdf,
             pdf_bsdf_marg,
             uv,
+            rough,
             TRANSPORTMODE_RADIANCE,
             lod
         );
+        #if USE_RAY_CONES
+            coneSpread += RAYCONE_ROUGHNESS_SPREAD * rough;
+        #endif
 
         if (pdf_bsdf < EPSILON && !K_is_D(type) && (pathLength != 2))
         {
@@ -193,9 +198,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
         throughput *= f_val_bsdf * fabsf(outgoing.z) / pdf_bsdf;
         lastCosine = fabsf(outgoing.z);
-#if USE_RAY_CONES
-        coneSpread += RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
-#endif
+
         toWorld(outgoing, normal, outgoing);
 
         r.origin = shadingPos + (dot(outgoing, geoNormal) > 0.0f ? geoNormal : -geoNormal) * RAY_EPSILON;
@@ -276,8 +279,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             float3 f_val_bsdf;
             float pdf_bsdf;
             float pdf_bsdf_marg;
+            float rough;
 
-            sample_f_eval_lobe(
+            sample_f_eval_lobe_returnRoughness(
                 localState,
                 params.shadeContext.materials,
                 materialID,
@@ -291,9 +295,13 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 pdf_bsdf,
                 pdf_bsdf_marg,
                 uv,
+                rough,
                 TRANSPORTMODE_RADIANCE,
                 lod
             );
+            #if USE_RAY_CONES
+                coneSpread += RAYCONE_ROUGHNESS_SPREAD * rough;
+            #endif
 
             lightEmission = backface ? f3(0.0f) : lightEmission;
             if (luminance(lightEmission) > 0.0f) {
@@ -353,9 +361,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             lastPDF = pdf_bsdf;
             lastPDF_marg = pdf_bsdf_marg;
             lastCosine = fabsf(dot(outgoing, normal));
-#if USE_RAY_CONES
-            coneSpread += RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
-#endif
+
             #if DEBUG_MODE == 1
             lastPOS_GETRIDOFME = shadingPos;
             #endif
@@ -581,8 +587,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             float3 f_val_bsdf;
             float pdf_bsdf;
             float pdf_bsdf_marg;
+            float rough;
 
-            sample_f_eval_lobe(
+            sample_f_eval_lobe_returnRoughness(
                 localState,
                 params.shadeContext.materials,
                 materialID,
@@ -596,6 +603,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 pdf_bsdf,
                 pdf_bsdf_marg,
                 uv,
+                rough,
                 TRANSPORTMODE_RADIANCE,
                 lod
             );
@@ -624,7 +632,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             }
             lastCosine = fabsf(outgoing.z);
 #if USE_RAY_CONES
-            coneSpread += RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
+            coneSpread += RAYCONE_ROUGHNESS_SPREAD * rough;
 #endif
             toWorld(outgoing, normal, outgoing);
 
@@ -696,8 +704,10 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             float3 incomingDirLocal;
             toLocal(r.direction, normal, incomingDirLocal);
 
+            bool isLastPrefixVertex = (depth + 1 == loopBound - 1); // is this the last iteration (x_k-1)
+
             // needed for recon
-            if (depth + 1 == loopBound - 1) { // if this is the last iteration
+            if (isLastPrefixVertex) {
                 lastPos = shadingPos;
                 lastMaterialID_packedWithEmissiveFlag = materialID;
                 if (luminance(lightEmission) > 0.0f) {
@@ -709,11 +719,6 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 lastBackface = backface;
                 lastInDirLocal = incomingDirLocal;
                 lastNormal = normal;
-#if USE_RAY_CONES
-                lastConeWidth  = coneWidth;
-                lastConeSpread = coneSpread + RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
-                lastLod        = lod;
-#endif
 
                 // change: moved break to this block so that the rng state handed to the shift
                 // helpers is as of arriving to x_k-1
@@ -724,8 +729,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             float3 f_val_bsdf;
             float pdf_bsdf;
             float pdf_bsdf_marg;
+            float rough;
 
-            sample_f_eval_lobe(
+            sample_f_eval_lobe_returnRoughness(
                 localState,
                 params.shadeContext.materials,
                 materialID,
@@ -739,9 +745,20 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 pdf_bsdf,
                 pdf_bsdf_marg,
                 uv,
+                rough,
                 TRANSPORTMODE_RADIANCE,
                 lod
             );
+
+#if USE_RAY_CONES
+            if (isLastPrefixVertex) {
+                // roughness comes from the sample above so it picks up the mrTex multiplier,
+                // matching the full-replay path instead of the raw material.roughness field
+                lastConeWidth  = coneWidth;
+                lastConeSpread = coneSpread + RAYCONE_ROUGHNESS_SPREAD * rough;
+                lastLod        = lod;
+            }
+#endif
 
             lightEmission = backface ? f3(0.0f) : lightEmission;
             if (luminance(lightEmission) > 0.0f) {
@@ -765,7 +782,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 return {false, f3(0), 0.0f, 0.0f};
             }
 
-            if (depth + 1 == loopBound - 1) {
+            if (isLastPrefixVertex) {
                 break;
             }
 
@@ -806,7 +823,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             lastPDF = pdf_bsdf;
             lastCosine = fabsf(dot(outgoing, normal));
 #if USE_RAY_CONES
-            coneSpread += RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
+            coneSpread += RAYCONE_ROUGHNESS_SPREAD * rough;
 #endif
             #if DEBUG_MODE == 1
             lastPOS_GETRIDOFME = shadingPos;

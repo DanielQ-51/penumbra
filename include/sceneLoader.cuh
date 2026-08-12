@@ -23,17 +23,7 @@
 #ifndef ROOT_DIR
 #define ROOT_DIR "."
 #endif
-
-// -----------------------------------------------------------------------------
-// Scene loader — an alternative to the manual scene-building path.
-//
-// Canonical model: object-space meshes + an instance list. Nothing here bakes
-// transforms into stored vertices; that only happens in a backend finalizer
-// (software = flatten to world space, OptiX = keep object-space + per-instance
-// matrices). This file provides the canonical structs, the glTF accessor
-// readers, and loadGLTF. The finalizers (buildFlattened / buildInstanced) come
-// next.
-// -----------------------------------------------------------------------------
+//#define DISABLE_DDS_LOADER
 
 // ---- Transform ------------------------------------------------------------
 // Row-major 4x4 that transforms a column vector: p' = M * p, m[row*4 + col].
@@ -319,10 +309,10 @@ inline TexColorSpace colorSpaceForTextureType(TextureType t) {
 // =============================================================================
 class SceneLoader {
 public:
-    std::vector<SceneMesh>     meshes;
+    std::vector<SceneMesh>      meshes;
     std::vector<SceneInstance> instances;
-    std::vector<Material>      materials;
-    TextureManager             textures;
+    std::vector<Material>       materials;
+    TextureManager              textures;
 
     int addMaterial(const Material& m) {
         materials.push_back(m);
@@ -663,11 +653,12 @@ public:
     // (object-space upload + per-instance transformationMatrices + GAS/IAS).
 
 private:
-    // A decoded RGBA8 image, produced in parallel by decodeAllImages().
+    // Holds either decoded RGBA8 pixels or raw DDS compressed bytes.
     struct DecodedImage {
-        std::vector<unsigned char> rgba;
+        std::vector<unsigned char> data; 
         int  w = 0, h = 0;
         bool ok = false;
+        bool isDDS = false;
     };
 
     // Flat, independently-indexed accumulation for config-driven OBJ meshes —
@@ -760,33 +751,70 @@ private:
         return Material::Diffuse(f4(0.8f));
     }
 
-    // Decode one glTF image (embedded bufferView or external URI) with stb into
-    // imageCache_[i]. Each thread writes a distinct slot, so this is race-free.
+    // Decode one glTF image (embedded bufferView or external URI) into
+    // imageCache_[i]. Tries to load .dds bypass first, falls back to stbi.
     void decodeOneImage(const tg3_model& model, uint32_t i)
     {
         const tg3_image& img = model.images[i];
         int w = 0, h = 0, n = 0;
-        unsigned char* data = nullptr;
+        unsigned char* rawPixels = nullptr;
+        DecodedImage& di = imageCache_[i];
 
         if (img.buffer_view >= 0 && (uint32_t)img.buffer_view < model.buffer_views_count) {
             const tg3_buffer_view& bv = model.buffer_views[(uint32_t)img.buffer_view];
             if (bv.buffer >= 0 && (uint32_t)bv.buffer < model.buffers_count) {
                 const tg3_buffer& buf = model.buffers[(uint32_t)bv.buffer];
-                if (bv.byte_offset + bv.byte_length <= buf.data.count)
-                    data = stbi_load_from_memory(buf.data.data + bv.byte_offset,
-                                                 (int)bv.byte_length, &w, &h, &n, 4);
+                if (bv.byte_offset + bv.byte_length <= buf.data.count) {
+                    rawPixels = stbi_load_from_memory(buf.data.data + bv.byte_offset,
+                                                      (int)bv.byte_length, &w, &h, &n, 4);
+                    di.isDDS = false;
+                }
             }
-        } else if (img.uri.data && img.uri.len > 0 &&
-                   !tg3_is_data_uri(img.uri.data, img.uri.len)) {
-            std::string uri(img.uri.data, img.uri.len);
-            data = stbi_load((baseDir_ + uri).c_str(), &w, &h, &n, 4);
+        } 
+        else if (img.uri.data && img.uri.len > 0 && !tg3_is_data_uri(img.uri.data, img.uri.len)) {
+            std::string originalUri(img.uri.data, img.uri.len);
+
+#ifndef DISABLE_DDS_LOADER
+            std::string ddsUri = originalUri;
+            
+            // Swap extension to .dds for the fast path
+            size_t dot = ddsUri.find_last_of('.');
+            if (dot != std::string::npos) {
+                ddsUri = ddsUri.substr(0, dot) + ".dds";
+            }
+
+            std::string fullDdsPath = baseDir_ + ddsUri;
+            std::ifstream ddsFile(fullDdsPath, std::ios::binary | std::ios::ate);
+
+            // --- FAST PATH: DDS EXISTS ---
+            if (ddsFile.is_open()) {
+                std::streamsize size = ddsFile.tellg();
+                ddsFile.seekg(0, std::ios::beg);
+                
+                di.data.resize(size);
+                if (ddsFile.read(reinterpret_cast<char*>(di.data.data()), size)) {
+                    // Raw BC7 blocks loaded. You will need to parse the DDS header 
+                    // inside TextureManager::addFromDDS to get width, height, and mips.
+                    di.ok = true;
+                    di.isDDS = true;
+                    return; // Skip stb_image completely
+                }
+            }
+            
+            // --- SLOW PATH: FALLBACK TO STB_IMAGE ---
+            std::cerr << "Warning: Optimized DDS not found for '" << originalUri 
+                      << "'. Falling back to uncompressed load (cache miss penalty).\n";
+#endif
+            rawPixels = stbi_load((baseDir_ + originalUri).c_str(), &w, &h, &n, 4);
+            di.isDDS = false;
         }
 
-        if (data) {
-            DecodedImage& di = imageCache_[i];
-            di.w = w; di.h = h; di.ok = true;
-            di.rgba.assign(data, data + (size_t)w * h * 4);
-            stbi_image_free(data);
+        if (rawPixels) {
+            di.w = w; 
+            di.h = h; 
+            di.ok = true;
+            di.data.assign(rawPixels, rawPixels + (size_t)w * h * 4);
+            stbi_image_free(rawPixels);
         }
     }
 
@@ -823,13 +851,15 @@ private:
         int our = -1;
         const tg3_texture& tex = model.textures[(uint32_t)gltfTexIndex];
         if (tex.source >= 0 && (uint32_t)tex.source < imageCache_.size()) {
-            // Bytes were decoded in parallel by decodeAllImages(); here we only
-            // do the (serial) mip-gen + GPU upload. `cs` (sRGB vs linear) is a
-            // per-texture property, so the same decoded image can be uploaded
-            // under different colorspaces.
             const DecodedImage& di = imageCache_[(uint32_t)tex.source];
-            if (di.ok)
-                our = textures.addFromMemory(di.rgba.data(), di.w, di.h, cs);
+            if (di.ok) {
+                if (di.isDDS) {
+                    // Requires implementation in TextureManager
+                    our = textures.addFromDDS(di.data.data(), di.data.size(), cs);
+                } else {
+                    our = textures.addFromMemory(di.data.data(), di.w, di.h, cs);
+                }
+            }
         }
         gltfTextureMap_[gltfTexIndex] = our;
         return our;
