@@ -37,8 +37,15 @@ extern "C" __global__ void __raygen__unidirectional() {
     bool prevDelta = false;
     float lastPDF = 0.0f;
     for (int depth = 0; depth < params.max_depth; depth++)
-    {
-        SurfaceHit hitData = traceClosest(params, r);
+    {   
+        SurfaceHit hitData;
+
+        if (params.newVersion) {
+            hitData = traceClosestHitObjSER(params, r);
+        } else {
+            hitData = traceClosestNoSER(params, r);
+        }
+        
         if (!hitData.isHit)
         {
             float3 contribution = throughput * params.shadeContext.lightSampler.envMap.sampleDir(r.direction);
@@ -48,6 +55,11 @@ extern "C" __global__ void __raygen__unidirectional() {
             );
             Li += contribution * misWeight;
             break;
+        }
+        if (params.newVersion) {
+            //optixReorder();
+        } else {
+            optixReorder(1u, 0u);
         }
 
         int materialID;

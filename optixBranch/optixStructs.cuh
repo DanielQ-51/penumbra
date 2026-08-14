@@ -52,6 +52,10 @@ struct CommonParams {
     uint32_t h;
     uint32_t frame_index;
     uint32_t max_depth;
+
+    bool newVersion;
+    float  padSentinel;   // host-set; the pad sum can never reach it
+    float* padSink;
 };
 
 struct RestirCommonParams {

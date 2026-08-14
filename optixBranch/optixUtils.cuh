@@ -58,6 +58,77 @@ __device__ __forceinline__ SurfaceHit traceClosestSER(
 
     return hit;
 }
+
+__device__ __forceinline__ SurfaceHit traceClosestHitObjSER(
+    const CommonParams& params,
+    const Ray& r,
+    float tmax = 1e30
+) {
+    optixTraverse(
+        params.bvh_handle,
+        r.origin, r.direction,
+        EPSILON, tmax, 0.0f,
+        OptixVisibilityMask(255),
+        OPTIX_RAY_FLAG_DISABLE_ANYHIT,
+        0, 1, 0
+    );
+
+    uint32_t reorderKey;
+    SurfaceHit hit;
+    hit.isHit = optixHitObjectIsHit(); 
+    if (hit.isHit) {
+        hit.t = optixHitObjectGetRayTmax();
+        hit.primId = optixHitObjectGetPrimitiveIndex();
+        hit.instanceId = optixHitObjectGetInstanceId();
+
+        // although this is better than invoking, this is still not optimal.
+        // This requires an whole triangle intersection sequence, but it is faster than the context switch
+        // that comes with a non-empty closest hit shader
+        hit.barycentrics = getBarycentrics(params.shadeContext, hit.primId, r, hit.instanceId);
+
+        //hit.barycentrics = optixHitObjectGetTriangleBarycentrics();
+    }
+
+    optixReorder();
+
+    return hit;
+}
+
+__device__ __forceinline__ SurfaceHit traceClosestStreamCompactSER(
+    const CommonParams& params,
+    const Ray& r,
+    float tmax = 1e30
+) {
+    optixTraverse(
+        params.bvh_handle,
+        r.origin, r.direction,
+        EPSILON, tmax, 0.0f,
+        OptixVisibilityMask(255),
+        OPTIX_RAY_FLAG_DISABLE_ANYHIT,
+        0, 1, 0
+    );
+
+    uint32_t reorderKey;
+    SurfaceHit hit;
+    hit.isHit = optixHitObjectIsHit(); 
+    if (hit.isHit) {
+        hit.t = optixHitObjectGetRayTmax();
+        hit.primId = optixHitObjectGetPrimitiveIndex();
+        hit.instanceId = optixHitObjectGetInstanceId();
+
+        // although this is better than invoking, this is still not optimal.
+        // This requires an whole triangle intersection sequence, but it is faster than the context switch
+        // that comes with a non-empty closest hit shader
+        hit.barycentrics = getBarycentrics(params.shadeContext, hit.primId, r, hit.instanceId);
+
+        //hit.barycentrics = optixHitObjectGetTriangleBarycentrics();
+    }
+
+    optixReorder();
+
+    return hit;
+}
+
 __device__ __forceinline__ SurfaceHit traceClosestNoSER(
     const CommonParams& params,
     Ray r,

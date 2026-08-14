@@ -147,7 +147,7 @@ __host__ void launch_restir (
     cudaEventCreate(&stop);
 
 #if CAMERA_MOVES == 0 
-    TurntableCameraAnimation animation = TurntableCameraAnimation(f3(0.0f, 0.0f, -1.5f), 6.5f, -0.0f, 90.0f, 0.0f);
+    //TurntableCameraAnimation animation = TurntableCameraAnimation(f3(0.0f, 0.0f, -1.5f), 6.5f, -0.0f, 90.0f, 0.0f);
 #else
     //TurntableCameraAnimation animation = TurntableCameraAnimation(f3(0.0f, 0.0f, -1.5f), 6.5f, -0.36f, 90.0f, 0.0f);
     //OrbitCameraAnimation animation = OrbitCameraAnimation(f3(0.0f, 1.0f, 0.0f), 2.5f, -0.5f, 90.0f, -20.0f);

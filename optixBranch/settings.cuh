@@ -27,11 +27,11 @@
 #endif
 
 #ifndef SAVE_SEQUENCE
-#define SAVE_SEQUENCE 1
+#define SAVE_SEQUENCE 9
 #endif
 
 #ifndef SAVE_FOR_VIDEO
-#define SAVE_FOR_VIDEO 1
+#define SAVE_FOR_VIDEO 9
 #endif
 
 #ifndef ACCUMULATE_FRAMES
@@ -47,7 +47,7 @@
 #endif
 
 #ifndef CAMERA_MOVES
-#define CAMERA_MOVES 1
+#define CAMERA_MOVES 0
 #endif
 
 #ifndef LERP_MCAP
@@ -95,7 +95,7 @@
 // Run the OptiX denoiser (HDR model, albedo + geometric-normal guides) on the
 // reconstructed linear-HDR frame before tone-mapping. 0 = save the raw noisy frame.
 #ifndef USE_DENOISER
-#define USE_DENOISER 1
+#define USE_DENOISER 0
 #endif
 
 #ifndef TEMPORAL_USE_DUAL_MV
