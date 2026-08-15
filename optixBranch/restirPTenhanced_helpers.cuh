@@ -29,13 +29,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
     // k=d and k=d-1 store raw emission divided by the light pdf, so it fits in RGB9E5's range
     // (a bright sun overflows the ~65408 ceiling and loses its magnitude entirely). Decode here.
-    // rcRadiance is by-value, so the caller's copy stays encoded for re-storage.
     if (needNeePDF(type) && cached_nee > 0.0f) {
         rcRadiance *= cached_nee;
     }
-
-    uint32_t reorderHint = (rcVertexIndex == FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY) ? 0u : 0xFFFFFFFF;
-    optixReorder(reorderHint, 1); // ser so good
 
     RNGState localState = load_rng(seed); // seed path using other pixel's start seed
 
@@ -81,13 +77,12 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
         float primaryFootprint;
     {
-        SurfaceHit hitData = traceClosest(params, r);
+        SurfaceHit hitData = traceClosestNoSER(params, r);
 
         if (!hitData.isHit) {
             if (IS_DEBUG_PIXEL(x, y)) {
                 DEBUG_PRINTF("SHIFT ABORT [%s]: primary ray miss for full replay\n", isReverseShift ? "REVERSE" : "FORWARD");
-            }
-            return {false, f3(0), 0.0f, 0.0f}; // Something went wrong, and the shift cannot be completed
+            }            return {false, f3(0), 0.0f, 0.0f}; // Something went wrong, and the shift cannot be completed
         }
 
         int materialID;
@@ -181,8 +176,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         {
             if (IS_DEBUG_PIXEL(x, y)) {
                 DEBUG_PRINTF("SHIFT ABORT [%s]: full replay scattering pdf zero for primary hit\n", isReverseShift ? "REVERSE" : "FORWARD");
-            }
-            return {false, f3(0), 0.0f, 0.0f}; // something went wrong, cant finish temporal shift
+            }            return {false, f3(0), 0.0f, 0.0f}; // something went wrong, cant finish temporal shift
         }
 
         float lum = luminance(throughput);
@@ -191,8 +185,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         if (rr_roll > p) {
             if (IS_DEBUG_PIXEL(x, y)) {
                 DEBUG_PRINTF("SHIFT ABORT [%s]: FULL REPLAY RR failed", isReverseShift ? "REVERSE" : "FORWARD");
-            }
-            return {false, f3(0), 0.0f, 0.0f};
+            }            return {false, f3(0), 0.0f, 0.0f};
         }
         throughput /= p;
 
@@ -213,13 +206,12 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         #endif
         // depth + 1 is the "index" of the curr vertex, so this stops at y_k-1
         for (int depth = 1; depth + 1 < pathLength; depth++) {
-            SurfaceHit hitData = traceClosest(params, r);
+            SurfaceHit hitData = traceClosestNoSER(params, r);
 
             if (!hitData.isHit) {
                 if (IS_DEBUG_PIXEL(x, y)) {
                     DEBUG_PRINTF("SHIFT ABORT [%s]: full replay secondary ray missed scene\n", isReverseShift ? "REVERSE" : "FORWARD");
-                }
-                return {false, f3(0), 0.0f, 0.0f}; // Something went wrong, and the shift cannot be completed
+                }                return {false, f3(0), 0.0f, 0.0f}; // Something went wrong, and the shift cannot be completed
             }
 
             int materialID;
@@ -321,8 +313,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             if (!isValid) {
                 if (IS_DEBUG_PIXEL(x, y)) {
                     DEBUG_PRINTF("SHIFT ABORT [%s]: full replay failed reciprocality on dual footprint\n", isReverseShift ? "REVERSE" : "FORWARD");
-                }
-                return {false, f3(0), 0.0f, 0.0f};
+                }                return {false, f3(0), 0.0f, 0.0f};
             }
 
             if (!currDelta) {
@@ -339,8 +330,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             if (rr_roll > p) {
                 if (IS_DEBUG_PIXEL(x, y)) {
                     DEBUG_PRINTF("SHIFT ABORT [%s]: FULL REPLAY RR failed", isReverseShift ? "REVERSE" : "FORWARD");
-                }
-                return {false, f3(0), 0.0f, 0.0f};
+                }                return {false, f3(0), 0.0f, 0.0f};
             }
             throughput /= p;
 
@@ -348,8 +338,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             {
                 if (IS_DEBUG_PIXEL(x, y)) {
                     DEBUG_PRINTF("SHIFT ABORT [%s]: full replay scattering pdf zero for secondary bounce\n", isReverseShift ? "REVERSE" : "FORWARD");
-                }
-                return {false, f3(0), 0.0f, 0.0f};
+                }                return {false, f3(0), 0.0f, 0.0f};
             }
 
             throughput *= f_val_bsdf * fabsf(outgoing.z) / pdf_bsdf;
@@ -367,15 +356,14 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             #endif
         }
 
-        // now we are on the last bounce
-        SurfaceHit hitData = traceClosest(params, r);
+        // now we are on the last bounce. 
+        SurfaceHit hitData = traceClosestNoSER(params, r);
 
         if (is_env(type)) {
             if (hitData.isHit) {
                 if (IS_DEBUG_PIXEL(x, y)) {
                     DEBUG_PRINTF("SHIFT ABORT [%s]: last full replay hit scene when it should hit env\n", isReverseShift ? "REVERSE" : "FORWARD");
-                }
-                return {false, f3(0), 0.0f, 0.0f};
+                }                return {false, f3(0), 0.0f, 0.0f};
             }
             ShiftResult result;
 
@@ -392,21 +380,17 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
             result.isValid = true;
             result.jacobian = 1.0f;
-            result.new_cached_jacobian = 1.0f;
-
-            return result;
+            result.new_cached_jacobian = 1.0f;            return result;
         } else {
             if (!hitData.isHit) {
                 if (IS_DEBUG_PIXEL(x, y)) {
                     DEBUG_PRINTF("SHIFT ABORT [%s]: last full replay hit env when it should hit scene\n", isReverseShift ? "REVERSE" : "FORWARD");
-                }
-                return {false, f3(0), 0.0f, 0.0f};
+                }                return {false, f3(0), 0.0f, 0.0f};
             }
         }
 
         if (!is_bsdf(type)) {
-            DEBUG_PRINTF("Error: full replay for bsdf has wrongly packed type or wrongly chosen rcvertexindex flag\n");
-            return {false, f3(0), 0.0f, 0.0f};
+            DEBUG_PRINTF("Error: full replay for bsdf has wrongly packed type or wrongly chosen rcvertexindex flag\n");            return {false, f3(0), 0.0f, 0.0f};
         }
 
         int materialID;
@@ -503,7 +487,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
         float primaryFootprint;
     {
-        SurfaceHit hitData = traceClosest(params, r);
+        SurfaceHit hitData = traceClosestNoSER(params, r);
 
         if (!hitData.isHit) {
             if (IS_DEBUG_PIXEL(x, y)) {
@@ -652,7 +636,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             rcVertexIndex;
         // depth + 1 is the "index" of the curr vertex, so this stops at y_k-1
         for (int depth = 1; depth + 1 < loopBound; depth++) {
-            SurfaceHit hitData = traceClosest(params, r);
+            SurfaceHit hitData = traceClosestNoSER(params, r);
 
             if (!hitData.isHit) {
                 if (IS_DEBUG_PIXEL(x, y)) {

@@ -17,7 +17,7 @@
 // under renders/unidirectional/. 0 = clean ReSTIR-only build (no PT code, no
 // per-frame timing overhead compiled in).
 #ifndef EQUAL_TIME_COMPARE
-#define EQUAL_TIME_COMPARE 1
+#define EQUAL_TIME_COMPARE 0
 #endif
 
 // Master switch for device side debug instrumentation.
@@ -26,12 +26,20 @@
 #define DEBUG_MODE 0
 #endif
 
+// Technique-profiling suite. When 1, initRender routes to launchProfile instead
+// of the normal launch_* path: it sweeps CommonParams::debugVersion across the
+// PROFILE_ARMS table (profiling.cuh) for the compile-time-selected integrator
+// and reports paired per-variant timing statistics. 0 = normal render.
+#ifndef PROFILE_TECHNIQUES
+#define PROFILE_TECHNIQUES 1
+#endif
+
 #ifndef SAVE_SEQUENCE
-#define SAVE_SEQUENCE 9
+#define SAVE_SEQUENCE 0
 #endif
 
 #ifndef SAVE_FOR_VIDEO
-#define SAVE_FOR_VIDEO 9
+#define SAVE_FOR_VIDEO 0
 #endif
 
 #ifndef ACCUMULATE_FRAMES
@@ -51,7 +59,7 @@
 #endif
 
 #ifndef LERP_MCAP
-#define LERP_MCAP 20.0f
+#define LERP_MCAP 300.0f
 #endif
 
 #ifndef RECON_FOOTPRINT_C_CONSTANT

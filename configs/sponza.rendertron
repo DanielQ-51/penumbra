@@ -11,8 +11,10 @@ height: 1716
 width: 1920
 height: 1080
 
-Integrator: OPTIXNORMAL
-Sample Count: 2000
+Exposure: 5.0
+
+Integrator: RESTIRPT
+Sample Count: 500
 Post Process: true
 
 Unidirectional Max Depth: 12
@@ -29,7 +31,7 @@ Meshes (path; multiplier * emission; materialID):
 .assets/scenedata/sponzaglass.obj; 0.0 * (0.0, 0.0, 0.0); 5
 
 GLTFs (path; maxTextureDim; emissionScale):
-assets/gltf/sponza_no_door/sponza_no_door.gltf; 4096; 100.0
+assets/gltf/sponza_no_door/sponza_no_door.gltf; 4096; 1.0
 .assets/gltf/pkg_a_curtains/NewSponza_Curtains_glTF.gltf; 4096; 100.0
 .assets/gltf/pkg_d_10k_candles/NewSponza_4_Combined_glTF.gltf; 256; 30.0
 .assets/gltf/sponza_lights/sponzalights.gltf; 512; 200.0

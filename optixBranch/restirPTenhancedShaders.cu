@@ -99,6 +99,9 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         save_rng(pixelIdx, &localState, nullptr);
         return;
     }
+    // reorder with empty flag: carries all alive threads to new homes while the returned
+    // (env-miss) threads are left behind. Done here, before depth-0 shading.
+    optixReorder(1u, 0u);
 
     int materialID;
     float2 uv;
@@ -150,6 +153,13 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
     restir.gbuffer.setGeometry(pixelIdx, normal, hitData.t, materialID, albedo);
 
     float2 currPixelPos = make_float2((float)x + __half2float(jitter.x), (float)y + __half2float(jitter.y));
+    if (fabsf(currPixelPos.x) < 1e-2) {
+        currPixelPos.x = 0;
+    }
+    if (fabsf(currPixelPos.y) < 1e-2) {
+        currPixelPos.y = 0;
+    }
+
     float2 lastPixelPos;
 
     float2 denoiserFlow = f2(0.0f);
@@ -159,7 +169,6 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         denoiserFlow = currPixelPos - lastPixelPos;
     }
 
-    // Still in the pre-SER (coalesced) write region, next to setGeometry.
     restir.denoiserGuides.setGuides(pixelIdx, albedo, geoNormal, denoiserFlow); // geometric normal, full-precision albedo, flow
 
     primaryFootprint =
@@ -370,13 +379,9 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
     lastPOS_GETRIDOFME = shadingPos;
     #endif
 }
-    // reorder with empty flag: carries all alive threads to new homes while the returned threads
-    // are left behind
-    optixReorder(0u, 0u);
-
     for (int depth = 1; depth < params.max_depth; depth++)
-    {
-        SurfaceHit hitData = traceClosest(params, r);
+    {   
+        SurfaceHit hitData = traceClosestNoSER(params, r);
         if (!hitData.isHit) // ENVIRONMENT
         {
             float pdf_sampleLight = params.shadeContext.lightSampler.evaluateEnvPdf(r.direction);
@@ -410,7 +415,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
                     rcInd = prevDelta ?
                         FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY : // direction copy is impossible if the prev vertex was full specular
                         FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_DIRECTION_COPY; // direction copy for environment map lowers variance
-                    rcInd = FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY;
+                    //rcInd = FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY;
                     } else if (pathRcVertexIndex == depth) {
                     // k = d - 1
                     // This means the previous iteration, the previous vertex was marked as the rc vertex, thus, the rcvertexgeometry
@@ -796,6 +801,8 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         #if DEBUG_MODE == 1
         lastPOS_GETRIDOFME = shadingPos;
         #endif
+
+        optixReorder(1u, 0u);
     }
 
 finalize_pixel:
@@ -826,8 +833,6 @@ extern "C" __global__ void __raygen__restirTemporalReuse() {
     const CommonParams& params = allParams.common; // gets compiled out, so not taking up registers
     const RestirCommonParams& restir = allParams.restir; // gets compiled out, so not taking up registers
 
-
-
     uint3 launch_index = optixGetLaunchIndex();
 
     uint32_t x = launch_index.x;
@@ -836,40 +841,28 @@ extern "C" __global__ void __raygen__restirTemporalReuse() {
     
     half2 mv = restir.gbuffer.getMV(pixelIdx);
     int2 historyCoord = make_int2(-1, -1);
-    uint32_t reorderHint = 0u;
+    bool ret = true;
 
     uint32_t mvBits = reinterpret_cast<const uint32_t&>(mv);
     if (mvBits != 0xFFFFFFFF) { // 0xFFFFFFFF = no reprojectable surface (env miss). Skip-shade pixels keep a real MV and reuse normally.
         if (isHistoryValid(allParams, make_int2(x, y), mv, historyCoord)) { // check primary movtion vec
-            reorderHint = 0xFFFFFFFF;
+            ret = false;
         } 
         #if TEMPORAL_USE_DUAL_MV == 1
         else {
             mv = restir.gbuffer.getDualMV(pixelIdx);
             if (isHistoryValid(allParams, make_int2(x, y), mv, historyCoord)) { // check dual motion vec
-                reorderHint = 0xFFFFFFFF;
+                ret = false;
             }
         }
         #endif
     }
 
-    // Optionally go one step beyond stream compaction, and sort by morton code
-#if TEMPORAL_SER_SORT_MORTON_CODE == 1
-    uint32_t cx = x >> 5;
-    uint32_t cy = y >> 5;
-
-    uint32_t spatial_hint = (expandBits(cx) | (expandBits(cy) << 1)) & 0x7Fu;
-    if (reorderHint != 0u) {
-        reorderHint = spatial_hint | 0x80u;
-    }
-
-    optixReorder(reorderHint, 8);
-#else
-    optixReorder(reorderHint, 1);
-#endif
-
-    if (reorderHint == 0u)
+    if (ret)
         return;
+    
+    optixReorder(1u, 0u);
+
 
     uint32_t historyIdx = historyCoord.x + historyCoord.y * params.w;
 
@@ -979,7 +972,18 @@ extern "C" __global__ void __raygen__restirTemporalReuse() {
     if (IS_DEBUG_PIXEL(x, y) && !needs_bwd_shift) {
         DEBUG_PRINTF("Backwards shift judged to not be needed.\n");
     }
-    //optixReorder(needs_bwd_shift, 1);
+
+    if (params.debugVersion == 1) {
+        // fold the shift's full-replay/reconnection sort into this reorder (self_rcVertexIndex
+        // already loaded); shift skips its own entry reorder under debugVersion==1
+        bool isFullReplay = (curr_rcVertexIndex == FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY);
+        uint32_t hint = isFullReplay | (needs_bwd_shift << 1u);
+        optixReorder(hint, 2u);
+    } else {
+        //optixReorder(selfShiftable ? 0xFFFFFFFFu : 0u, 1);
+        optixReorder(needs_bwd_shift, 1u);
+    }
+    //optixReorder(needs_bwd_shift, 1u);
 
     if (needs_bwd_shift) {
         // just for now, we want to print out everything.
@@ -1121,16 +1125,18 @@ extern "C" __global__ void __raygen__restirSpatialReuse() {
         && (self_M > 0u)
         && (self_cachedJacobian != -1.0f)
         && (reinterpret_cast<const uint32_t&>(mv) != 0xFFFFFFFF);
-        
-    uint32_t reorderHint = selfShiftable ? 0xFFFFFFFFu : 0u;
-#if TEMPORAL_SER_SORT_MORTON_CODE == 1
-    uint32_t spatial_hint = (expandBits(partnerCoord.x >> 5) |
-                            (expandBits(partnerCoord.y >> 5) << 1)) & 0x7Fu;
-    if (reorderHint != 0u) reorderHint = spatial_hint | 0x80u;
-    optixReorder(reorderHint, 8);
-#else
-    optixReorder(reorderHint, 1);
-#endif
+    
+
+
+    if (params.debugVersion == 1) {
+        // fold the shift's full-replay/reconnection sort into this reorder (self_rcVertexIndex
+        // already loaded); shift skips its own entry reorder under debugVersion==1
+        bool isFullReplay = (self_rcVertexIndex == FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY);
+        uint32_t hint = isFullReplay | (selfShiftable << 1u);
+        optixReorder(hint, 2u);
+    } else {
+        optixReorder(selfShiftable ? 0xFFFFFFFFu : 0u, 1);
+    }
 
     ShiftResult result;
 

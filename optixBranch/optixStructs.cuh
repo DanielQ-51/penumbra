@@ -53,9 +53,12 @@ struct CommonParams {
     uint32_t frame_index;
     uint32_t max_depth;
 
-    bool newVersion;
-    float  padSentinel;   // host-set; the pad sum can never reach it
-    float* padSink;
+    // Runtime technique-variant selector for the profiling suite. The raygen
+    // shaders branch on this (if (params.common.debugVersion == 0/1/2 ...)) to
+    // pick between optimization variants of the SAME integrator. launchProfile
+    // sweeps it across the PROFILE_ARMS table; normal render paths leave it 0
+    // (zero-initialized via `CommonParams params = {}` at every call site).
+    uint32_t debugVersion;
 };
 
 struct RestirCommonParams {

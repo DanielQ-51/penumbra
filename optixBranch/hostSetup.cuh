@@ -8,6 +8,7 @@
 #include "optixStructs.cuh"
 #include "restirPTenhanced_host.cuh"
 #include "unidirectional_host.cuh"
+#include "profiling.cuh"
 #include <chrono>
 #include <iostream>
 #include <exception>
@@ -690,13 +691,23 @@ int initRender(OptixEngineState& engineState, string configPath, int renderNumbe
     CUstream stream;
     cudaStreamCreate(&stream);
 
+#if PROFILE_TECHNIQUES
+    // Separate profiling option: sweep CommonParams::debugVersion across the
+    // PROFILE_ARMS table (profiling.cuh) for whichever integrator is compiled
+    // in, and report paired per-variant timing stats. `frames` reuses the
+    // config's sampleCount (= frameCount for ReSTIR, samples/arm for
+    // unidirectional). `warmup` frames render but are excluded from the stats.
+    launchProfile(engineState, params, integratorChoice,
+                  /*warmup*/ 8, /*frames*/ (uint32_t)sampleCount);
+#else
     if (integratorChoice == OPTIX_NORMAL) {
         launch_unidirectional(engineState, params, sampleCount);
     } else if (integratorChoice == OPTIX_RESTIR_PT) {
-        launch_restir(engineState, params, sampleCount);
+        launch_restir(engineState, params, sampleCount, config);
     } else {
         printf("Error: Integrator Unavaible in Optix Branch");
     }
+#endif
 
     // Normalize (divide by sampleCount) on the GPU. No overlay buffer in
     // this pipeline, so the NoOverlay variant. Divisor is
@@ -707,7 +718,7 @@ int initRender(OptixEngineState& engineState, string configPath, int renderNumbe
 
     if (gpuPostProcess) {
         postProcessOnly<<<gridSize, blockSize, 0, stream>>>(
-            d_finalOutput, d_finalOutput, w, h, 2.0f, image.use_fitted_aces
+            d_finalOutput, d_finalOutput, w, h, config.exposure, image.use_fitted_aces
         );
     }
 

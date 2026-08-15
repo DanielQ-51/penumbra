@@ -134,6 +134,7 @@ struct RenderConfig {
     int bvhLeafSize = 0;
     bool sampleEnvironment = false;
     bool postProcess = false;
+    float exposure = 1.0f; // post-process exposure multiplier; defaults to 1.0 when unspecified
 
     // BDPT Settings
     int bdptEyeDepth = 0;
@@ -441,6 +442,7 @@ __host__ inline bool loadConfig(const std::string& filepath, RenderConfig& confi
             else if (key == "Pinhole Camera") config.pinholeCamera = parseBool(value);
             else if (key == "SAMPLE_ENVIRONMENT") config.sampleEnvironment = parseBool(value);
             else if (key == "Post Process") config.postProcess = parseBool(value);
+            else if (key == "Exposure") config.exposure = std::stof(value);
             else if (key == "VCM_DOMERGE") config.vcmDoMerge = parseBool(value);
 
             // Vectors & Floats

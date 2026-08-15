@@ -11,61 +11,80 @@
 #include "restirPTenhancedShaders.cuh"
 #include "restirPTobjects.cuh"
 #include "hostSetup.cuh"
+#include "configParser.cuh" // RenderConfig, threaded into launch_restir for host-side post-process (exposure)
 #include "animation.cuh"
 #include "restirPTenhanced_kernels.cuh"
 #include "restirPTenhanced_spatialReuseTextures.cuh"
 #include "settings.cuh"
 #include <filesystem>
 
-__host__ void launch_restir (
-    OptixEngineState engineState,
-    CommonParams commonParams,
-    uint32_t frameCount
-) {
-    commonParams.camera.antiAliasJitterDist = 1.0f;
-    Reservoir reservoir1, reservoir2;
-    GBuffer gbuffer1;
-    GBuffer gbuffer2;
+// ---------------------------------------------------------------------------
+// Always-present ReSTIR device state. This is the buffer set both launch_restir
+// and the profiler (launchProfile) need. It is a plain pointer bundle -- no
+// methods -- holding the raw allocation handles for teardown plus d_params.
+// The Reservoir/GBuffer/ShiftResultBuffer/DenoiserGuides structs themselves
+// live in allParams.restir; only their backing memory handles live here.
+// The launcher-specific buffers (OptiX denoiser, equal-time PT) are NOT here --
+// they stay inline in launch_restir behind their #if gates.
+// ---------------------------------------------------------------------------
+struct RestirState {
+    void* r1Memory  = nullptr;
+    void* r2Memory  = nullptr;
+    void* gb1Memory = nullptr;
+    void* gb2Memory = nullptr;
+    void* dgMemory  = nullptr;
+    void* sr1Memory = nullptr;
+    void* sr2Memory = nullptr;
+    void* sr3Memory = nullptr;
+    short2* reuseTexture1 = nullptr;
+    short2* reuseTexture2 = nullptr;
+    short2* reuseTexture3 = nullptr;
+    float4*  d_finalOutput     = nullptr;
+    float4*  d_overlay         = nullptr;
+    uint8_t* d_duplication_map = nullptr;
+    CUdeviceptr d_params = 0;
+};
 
-    void* r1Memory = allocateReservoir(reservoir1, commonParams.w * commonParams.h);
-    void* r2Memory = allocateReservoir(reservoir2, commonParams.w * commonParams.h);
-    void* gb1Memory = allocateGBuffer(gbuffer1, commonParams.w * commonParams.h);
-    void* gb2Memory = allocateGBuffer(gbuffer2, commonParams.w * commonParams.h);
+// Allocate the ReSTIR buffer set and wire it into allParams.restir (+ the
+// overlay/dup pointers on allParams.common). allParams.common must already be
+// populated by the caller. Extracted verbatim from launch_restir's original
+// inline setup so both the launcher and the profiler share one allocation path.
+__host__ void setupRestirState(const CommonParams& commonParams, RestirState& s, PipelineParams& allParams) {
+    Reservoir reservoir1, reservoir2;
+    GBuffer   gbuffer1, gbuffer2;
+
+    s.r1Memory  = allocateReservoir(reservoir1, commonParams.w * commonParams.h);
+    s.r2Memory  = allocateReservoir(reservoir2, commonParams.w * commonParams.h);
+    s.gb1Memory = allocateGBuffer(gbuffer1, commonParams.w * commonParams.h);
+    s.gb2Memory = allocateGBuffer(gbuffer2, commonParams.w * commonParams.h);
 
     DenoiserGuides denoiserGuides;
-    void* dgMemory = allocateDenoiserGuides(denoiserGuides, commonParams.w * commonParams.h);
+    s.dgMemory = allocateDenoiserGuides(denoiserGuides, commonParams.w * commonParams.h);
 
-    short2* reuseTexture1 = allocateReuseTexture(254, 16);
-    short2* reuseTexture2 = allocateReuseTexture(230, 16);
-    short2* reuseTexture3 = allocateReuseTexture(210, 16);
+    s.reuseTexture1 = allocateReuseTexture(254, 16);
+    s.reuseTexture2 = allocateReuseTexture(230, 16);
+    s.reuseTexture3 = allocateReuseTexture(210, 16);
 
-    ShiftResultBuffer shiftResultBuffer1;
-    ShiftResultBuffer shiftResultBuffer2;
-    ShiftResultBuffer shiftResultBuffer3;
-    
-    void* sr_bufferMemory_1 = allocateShiftResultBuffer(shiftResultBuffer1, commonParams.w * commonParams.h);
-    void* sr_bufferMemory_2 = allocateShiftResultBuffer(shiftResultBuffer2, commonParams.w * commonParams.h);
-    void* sr_bufferMemory_3 = allocateShiftResultBuffer(shiftResultBuffer3, commonParams.w * commonParams.h);
-    
-
-    PipelineParams allParams = {};
-    allParams.common = commonParams;
+    ShiftResultBuffer shiftResultBuffer1, shiftResultBuffer2, shiftResultBuffer3;
+    s.sr1Memory = allocateShiftResultBuffer(shiftResultBuffer1, commonParams.w * commonParams.h);
+    s.sr2Memory = allocateShiftResultBuffer(shiftResultBuffer2, commonParams.w * commonParams.h);
+    s.sr3Memory = allocateShiftResultBuffer(shiftResultBuffer3, commonParams.w * commonParams.h);
 
     RestirCommonParams restirParams = {};
-    restirParams.reservoir = reservoir1;
+    restirParams.reservoir          = reservoir1;
     restirParams.lastFrameReservoir = reservoir2;
-    restirParams.gbuffer = gbuffer1;
-    restirParams.prevGbuffer = gbuffer2;
-    restirParams.reuseTextures[0] = reuseTexture1;
-    restirParams.reuseTextures[1] = reuseTexture2;
-    restirParams.reuseTextures[2] = reuseTexture3;
+    restirParams.gbuffer            = gbuffer1;
+    restirParams.prevGbuffer        = gbuffer2;
+    restirParams.reuseTextures[0]   = s.reuseTexture1;
+    restirParams.reuseTextures[1]   = s.reuseTexture2;
+    restirParams.reuseTextures[2]   = s.reuseTexture3;
     restirParams.reuseTextureSizes[0] = 254;
     restirParams.reuseTextureSizes[1] = 230;
     restirParams.reuseTextureSizes[2] = 210;
     restirParams.shiftResultBuffer[0] = shiftResultBuffer1;
     restirParams.shiftResultBuffer[1] = shiftResultBuffer2;
     restirParams.shiftResultBuffer[2] = shiftResultBuffer3;
-    restirParams.denoiserGuides = denoiserGuides;
+    restirParams.denoiserGuides       = denoiserGuides;
 
     allParams.restir = restirParams;
 
@@ -80,8 +99,134 @@ __host__ void launch_restir (
     );
 #endif
 
-    CUdeviceptr d_params;
-    cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(PipelineParams));
+    cudaMalloc(reinterpret_cast<void**>(&s.d_params), sizeof(PipelineParams));
+
+    cudaMalloc(&s.d_finalOutput, commonParams.w * commonParams.h * sizeof(float4));
+    cudaMemset(s.d_finalOutput, 0, commonParams.w * commonParams.h * sizeof(float4));
+    cudaMalloc(&s.d_overlay, commonParams.w * commonParams.h * sizeof(float4));
+    cudaMemset(s.d_overlay, 0, commonParams.w * commonParams.h * sizeof(float4));
+    cudaMalloc(&s.d_duplication_map, commonParams.w * commonParams.h * sizeof(uint8_t));
+    cudaMemset(s.d_duplication_map, 0, commonParams.w * commonParams.h * sizeof(uint8_t));
+
+    allParams.restir.duplication_map = s.d_duplication_map;
+    allParams.common.overlay_buffer  = s.d_overlay;
+}
+
+__host__ void freeRestirState(RestirState& s) {
+    cudaFree(reinterpret_cast<void*>(s.d_params));
+    cudaFree(s.r1Memory);
+    cudaFree(s.r2Memory);
+    cudaFree(s.gb1Memory);
+    cudaFree(s.gb2Memory);
+    cudaFree(s.dgMemory);
+    cudaFree(s.d_finalOutput);
+    cudaFree(s.d_overlay);
+    cudaFree(s.d_duplication_map);
+    cudaFree(s.reuseTexture1);
+    cudaFree(s.reuseTexture2);
+    cudaFree(s.reuseTexture3);
+    cudaFree(s.sr1Memory);
+    cudaFree(s.sr2Memory);
+    cudaFree(s.sr3Memory);
+}
+
+// ---------------------------------------------------------------------------
+// One ReSTIR frame's GPU work + temporal-history advancement -- exactly the
+// body of launch_restir's per-frame loop between recording frameStart and
+// frameStop, plus the loop-bottom ping-pong swaps. Caller responsibilities
+// (kept OUT of here so timing/output are unchanged): set frame_index +
+// debugVersion, upload allParams -> d_params BEFORE calling, bracket the call
+// with the timing events, and advance the camera afterward.
+//
+// allParams is taken by reference because the history ping-pong swaps mutate
+// its reservoir/gbuffer pointers and must persist to the next frame.
+//
+// NOTE: the loop-bottom swaps now run here (before the equal-time PT pass in
+// launch_restir) instead of after it. That is behavior-neutral: the PT pass
+// reads only allParams.common.camera (not yet animated) and its own private
+// accumulation buffer, and never touches the reservoir/gbuffer pointers.
+// ---------------------------------------------------------------------------
+__host__ void renderFrameRestir(
+    OptixEngineState& engineState,
+    PipelineParams&   allParams,
+    CUdeviceptr       d_params,
+    dim3 gridSize, dim3 blockSize,
+    uint32_t frame,
+    CUstream stream)
+{
+    const uint32_t w = allParams.common.w;
+    const uint32_t h = allParams.common.h;
+
+    // 1) Candidate generation -> fills allParams.restir.reservoir
+    optixLaunch(engineState.pipeline, stream, d_params, sizeof(PipelineParams),
+                &engineState.sbt_restirCandidate, w, h, 1);
+
+    computeDualMV<<<gridSize, blockSize, 0, stream>>>(allParams.restir.gbuffer, w, h);
+
+#if USE_DUPLICATION_MAP
+    computeDuplicationMapKernel<<<gridSize, blockSize, 0, stream>>>(
+        allParams.restir.lastFrameReservoir, allParams.restir.duplication_map, w, h);
+#endif
+
+    // 2) Temporal reuse (skipped on frame 0 -- no history yet)
+    if (frame > 0) {
+        optixLaunch(engineState.pipeline, stream, d_params, sizeof(PipelineParams),
+                    &engineState.sbt_restirTemporal, w, h, 1);
+    }
+
+#if DO_SPATIAL_SHIFT == 1
+    {
+        // 3) Spatial reuse: launch Z = NUM_REUSE_TEXTURES
+        optixLaunch(engineState.pipeline, stream, d_params, sizeof(PipelineParams),
+                    &engineState.sbt_restirSpatial, w, h, NUM_REUSE_TEXTURES);
+
+        resolveSpatialReuse<<<gridSize, blockSize, 0, stream>>>(allParams);
+
+        Reservoir temp = allParams.restir.lastFrameReservoir;
+        allParams.restir.lastFrameReservoir = allParams.restir.reservoir;
+        allParams.restir.reservoir = temp;
+    }
+#else
+    // Spatial disabled -> the resolve (and its shading section) never runs, so
+    // fall back to the standalone display kernel.
+    displayWinningReservoirs<<<gridSize, blockSize, 0, stream>>>(allParams);
+#endif
+
+    // ---- temporal-history advancement (was the bottom of the frame loop) ----
+    Reservoir temp = allParams.restir.lastFrameReservoir;
+    allParams.restir.lastFrameReservoir = allParams.restir.reservoir;
+    allParams.restir.reservoir = temp;
+
+    GBuffer tempGB = allParams.restir.prevGbuffer;
+    allParams.restir.prevGbuffer = allParams.restir.gbuffer;
+    allParams.restir.gbuffer = tempGB;
+
+    allParams.restir.lastFrameCamera = allParams.common.camera;
+}
+
+__host__ void launch_restir (
+    OptixEngineState engineState,
+    CommonParams commonParams,
+    uint32_t frameCount,
+    const RenderConfig& config
+) {
+
+    PipelineParams allParams = {};
+    allParams.common = commonParams;
+
+    // All the always-present ReSTIR buffers + d_params + overlay/dup wiring now
+    // live in setupRestirState (shared with the profiler). Local aliases keep
+    // the launcher-specific code below (denoiser, equal-time, save, memset
+    // init, teardown) reading exactly as before.
+    RestirState state;
+    setupRestirState(commonParams, state, allParams);
+
+    void* r1Memory  = state.r1Memory;
+    void* r2Memory  = state.r2Memory;
+    void* gb1Memory = state.gb1Memory;
+    void* gb2Memory = state.gb2Memory;
+    void* dgMemory  = state.dgMemory;
+    CUdeviceptr d_params = state.d_params;
 
     CUstream stream;
     cudaStreamCreate(&stream);
@@ -185,21 +330,13 @@ __host__ void launch_restir (
     // saveImageBMP() doesn't re-apply it on top of the already-processed data.
     const bool gpuPostProcess = image.postProcess;
     image.postProcess = false;
-    float4* d_finalOutput;
-    cudaMalloc(&d_finalOutput, commonParams.w * commonParams.h * sizeof(float4));
-    cudaMemset(d_finalOutput, 0, commonParams.w * commonParams.h * sizeof(float4));
 
-    float4* d_overlay;
-    cudaMalloc(&d_overlay, commonParams.w * commonParams.h * sizeof(float4));
-    cudaMemset(d_overlay, 0, commonParams.w * commonParams.h * sizeof(float4));
-    float4* host_colors = new float4[commonParams.w * commonParams.h];
-
-    uint8_t* d_duplication_map;
-    cudaMalloc(&d_duplication_map, commonParams.w * commonParams.h * sizeof(uint8_t));
-    cudaMemset(d_duplication_map, 0, commonParams.w * commonParams.h * sizeof(uint8_t));
-
-    allParams.restir.duplication_map = d_duplication_map;
-    allParams.common.overlay_buffer = d_overlay;
+    // Output/overlay/dup buffers are owned by setupRestirState (and already
+    // wired into allParams). Alias them so the save code below is unchanged.
+    float4*  d_finalOutput     = state.d_finalOutput;
+    float4*  d_overlay         = state.d_overlay;
+    uint8_t* d_duplication_map = state.d_duplication_map;
+    float4*  host_colors       = new float4[commonParams.w * commonParams.h];
 
     size_t freeB, totalB;
     cudaMemGetInfo(&freeB, &totalB);
@@ -271,74 +408,10 @@ __host__ void launch_restir (
         cudaEventRecord(frameStart, stream);
 #endif
 
-        optixLaunch(
-            engineState.pipeline,
-            stream,
-            d_params,
-            sizeof(PipelineParams),
-            &engineState.sbt_restirCandidate,
-            commonParams.w,                   // Launch X
-            commonParams.h,                   // Launch Y
-            1                       // Launch Z
-        );
-
-        computeDualMV<<<gridSize, blockSize, 0, stream>>>(
-            allParams.restir.gbuffer, 
-            commonParams.w, 
-            commonParams.h
-        );
-
-#if USE_DUPLICATION_MAP
-        computeDuplicationMapKernel<<<gridSize, blockSize, 0, stream>>>(
-            allParams.restir.lastFrameReservoir,
-            allParams.restir.duplication_map,
-            commonParams.w,
-            commonParams.h
-        );
-#endif
-        
-
-        if (frame > 0) {
-            optixLaunch(
-                engineState.pipeline,
-                stream,
-                d_params,
-                sizeof(PipelineParams),
-                &engineState.sbt_restirTemporal,
-                commonParams.w,                   // Launch X
-                commonParams.h,                   // Launch Y
-                1                       // Launch Z
-            );
-        }
-
-#if DO_SPATIAL_SHIFT == 1 
-{
-        optixLaunch(
-            engineState.pipeline,
-            stream,
-            d_params,
-            sizeof(PipelineParams), 
-            &engineState.sbt_restirSpatial,                  
-            commonParams.w,                   // Launch X
-            commonParams.h,                   // Launch Y
-            NUM_REUSE_TEXTURES                       // Launch Z
-        );
-
-        resolveSpatialReuse<<<gridSize, blockSize, 0, stream>>>(
-            allParams
-        );
-
-        Reservoir temp = allParams.restir.lastFrameReservoir;
-        allParams.restir.lastFrameReservoir = allParams.restir.reservoir;
-        allParams.restir.reservoir = temp;
-}
-#else
-        // Spatial disabled -> the resolve (and its shading section) never runs,
-        // so fall back to the standalone display kernel. Note this path still
-        // shades with F*W, so it retains the color noise the vector-weight
-        // shading in resolveSpatialReuse is there to fix.
-        displayWinningReservoirs<<<gridSize, blockSize, 0, stream>>>(allParams);
-#endif
+        // One ReSTIR frame: candidate -> dual-MV (-> dup map) -> temporal ->
+        // spatial+resolve (or display), plus temporal-history ping-pong. The
+        // frameStart/frameStop events below bracket exactly this call.
+        renderFrameRestir(engineState, allParams, d_params, gridSize, blockSize, frame, stream);
 
 #if EQUAL_TIME_COMPARE == 1
         // End of the ReSTIR render work for this frame. Everything after this
@@ -404,7 +477,7 @@ __host__ void launch_restir (
         // Divisor is currentSampleCount + 1, so pass ptSamples - 1 to divide by ptSamples.
         cleanFormatAndPostProcessImage<<<gridSize, blockSize, 0, stream>>>(
             d_pt_accum, nullptr, d_pt_final, commonParams.w, commonParams.h, ptSamples - 1,
-            2.0f, true
+            config.exposure, true
         );
         cudaMemcpyAsync(host_colors, d_pt_final,
                         commonParams.w * commonParams.h * sizeof(float4),
@@ -476,7 +549,7 @@ __host__ void launch_restir (
         // buffer kept for next frame's temporal history stays linear.
         if (gpuPostProcess) {
             postProcessOnly<<<gridSize, blockSize, 0, stream>>>(
-                d_denoisePrev, d_finalOutput, commonParams.w, commonParams.h, 2.0f, true
+                d_denoisePrev, d_finalOutput, commonParams.w, commonParams.h, config.exposure, true
             );
             cudaMemcpyAsync(host_colors, d_finalOutput, commonParams.w * commonParams.h * sizeof(float4), cudaMemcpyDeviceToHost, stream);
         } else {
@@ -485,7 +558,7 @@ __host__ void launch_restir (
 #else
         if (gpuPostProcess) {
             postProcessOnly<<<gridSize, blockSize, 0, stream>>>(
-                d_finalOutput, d_finalOutput, commonParams.w, commonParams.h, 2.0f, true
+                d_finalOutput, d_finalOutput, commonParams.w, commonParams.h, config.exposure, true
             );
         }
         cudaMemcpyAsync(host_colors, d_finalOutput, commonParams.w * commonParams.h * sizeof(float4), cudaMemcpyDeviceToHost, stream);
@@ -516,16 +589,8 @@ __host__ void launch_restir (
         cudaMemsetAsync(d_overlay, 0, commonParams.w * commonParams.h * sizeof(float4), stream);
 #endif
 
-        // Swap reservoirs (changes baked into vram at start of loop)
-        Reservoir temp = allParams.restir.lastFrameReservoir;
-        allParams.restir.lastFrameReservoir = allParams.restir.reservoir;
-        allParams.restir.reservoir = temp;
-        
-        GBuffer tempGB = allParams.restir.prevGbuffer;
-        allParams.restir.prevGbuffer = allParams.restir.gbuffer;
-        allParams.restir.gbuffer = tempGB;
-
-        allParams.restir.lastFrameCamera = allParams.common.camera;
+        // Reservoir/gbuffer ping-pong + lastFrameCamera now happen inside
+        // renderFrameRestir. Only the camera animation advance stays here.
 #if CAMERA_MOVES != 0
         animation.update(allParams.common.camera, frame + 1);
 #endif
@@ -556,7 +621,6 @@ __host__ void launch_restir (
 
 
 
-    cudaFree(reinterpret_cast<void*>(d_params));
 #if EQUAL_TIME_COMPARE == 1
     cudaFree(d_pt_accum);
     cudaFree(d_pt_final);
@@ -568,8 +632,6 @@ __host__ void launch_restir (
     cudaEventDestroy(ptMid);
     cudaEventDestroy(ptNow);
 #endif
-    cudaFree(r1Memory);
-    cudaFree(r2Memory);
 #if USE_DENOISER == 1
     optixDenoiserDestroy(denoiser);
     cudaFree(reinterpret_cast<void*>(d_denoiserState));
@@ -578,18 +640,10 @@ __host__ void launch_restir (
     cudaFree(d_denoiseOut);
     cudaFree(d_denoisePrev);
 #endif
-    cudaFree(gb1Memory);
-    cudaFree(gb2Memory);
-    cudaFree(dgMemory);
-    cudaFree(d_finalOutput);
-    cudaFree(d_overlay);
-    cudaFree(d_duplication_map);
-    cudaFree(reuseTexture1);
-    cudaFree(reuseTexture2);
-    cudaFree(reuseTexture3);
-    cudaFree(sr_bufferMemory_1);
-    cudaFree(sr_bufferMemory_2);
-    cudaFree(sr_bufferMemory_3);
+    // All always-present ReSTIR buffers (reservoirs, gbuffers, denoiser guides,
+    // reuse textures, shift buffers, output/overlay/dup, d_params) are freed here.
+    freeRestirState(state);
+    delete[] host_colors;
 }
 
 
