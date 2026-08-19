@@ -480,6 +480,7 @@ __global__ void cleanFormatAndPostProcessImage(
         color = make_float3(0.0f, 1.0f, 0.0f);
     } 
     else if (acc.x < 0 || acc.y < 0 || acc.z < 0) {
+        printf("negative!");
         color = make_float3(0.0f, 0.0f, 1.0f);
     } 
     else {

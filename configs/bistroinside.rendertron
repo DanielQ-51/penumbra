@@ -11,7 +11,7 @@ height: 1716
 width: 1920
 height: 1080
 
-Exposure: 2.0
+Exposure: 1.0
 
 Integrator: RESTIRPT
 Sample Count: 1000
@@ -21,18 +21,14 @@ Unidirectional Max Depth: 12
 BVH recommended leaf size: 2
 
 Pinhole Camera: true
-Camera Position: -7.40743 1.59222 -0.858258
-Camera Rotation: 32.2 -100.69 0.0
+Camera Position: -0.248104 1.75428 -0.99419 m
+Camera Rotation: 88.018 -64.411d 0.0
 Camera Apeture: 0.0
 Camera FocalDist: 0.0
 Camera FOV: 50.0
 
 Meshes (path; multiplier * emission; materialID):
-assets/scenedata/sponzaglass.obj; 0.0 * (0.0, 0.0, 0.0); 5
 
 GLTFs (path; maxTextureDim; emissionScale):
-assets/gltf/sponza_no_door/sponza_no_door.gltf; 2048; 1.0
-.assets/gltf/pkg_a_curtains/NewSponza_Curtains_glTF.gltf; 4096; 100.0
-.assets/gltf/pkg_d_10k_candles/NewSponza_4_Combined_glTF.gltf; 256; 30.0
-.assets/gltf/sponza_lights/sponzalights.gltf; 512; 100.0
 
+assets/gltf/bistrointerior/bistrointerior.gltf; 4096; 1.0f

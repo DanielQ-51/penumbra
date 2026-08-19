@@ -77,14 +77,9 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
 #else
         params.accum_buffer[pixelIdx] = f4(contribution);
 #endif
-        restir.reservoir.setPathFlags(pixelIdx, 0);
-        restir.reservoir.setCachedJacobian(pixelIdx, -1.0f); // gate this out of shifts, like the empty-hit case
-        restir.reservoir.setF(pixelIdx, 0u); // no reservoir here: zero contribution, not last-cycle stale radiance
+        restir.reservoir.saveReservoirGatedOut(pixelIdx, 0u, 0.0f); // env miss: M=0, gated (jacobian=-1), F=0
         restir.gbuffer.setInvalidMotionVec(pixelIdx);
 
-        // Env miss has no world position to reproject, but it does have a world direction:
-        // run it through last frame's camera basis (rotation only, no cameraOrigin subtraction)
-        // to get the flow the panning sky needs. See Camera::dirToRaster.
         float2 envDenoiserFlow = f2(0.0f);
         if (params.frame_index != 0) {
             float2 currPixelPos = make_float2((float)x + __half2float(jitter.x), (float)y + __half2float(jitter.y));
@@ -92,16 +87,11 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
             if (restir.lastFrameCamera.dirToRaster(r.direction, lastPixelPos)) {
                 envDenoiserFlow = currPixelPos - lastPixelPos;
             }
-            // else: direction rotated out of last frame's FOV; leave flow at 0 and let the
-            // denoiser treat it as disoccluded, same as any other reprojection miss.
         }
         restir.denoiserGuides.setGuides(pixelIdx, f3(0.0f), -r.direction, envDenoiserFlow); // env miss: no surface albedo/normal, but flow now tracks camera rotation
         save_rng(pixelIdx, &localState, nullptr);
         return;
     }
-    // reorder with empty flag: carries all alive threads to new homes while the returned
-    // (env-miss) threads are left behind. Done here, before depth-0 shading.
-    optixReorder(1u, 0u);
 
     int materialID;
     float2 uv;
@@ -153,10 +143,10 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
     restir.gbuffer.setGeometry(pixelIdx, normal, hitData.t, materialID, albedo);
 
     float2 currPixelPos = make_float2((float)x + __half2float(jitter.x), (float)y + __half2float(jitter.y));
-    if (fabsf(currPixelPos.x) < 1e-2) {
+    if (fabsf(currPixelPos.x) < 1e-2f) {
         currPixelPos.x = 0;
     }
-    if (fabsf(currPixelPos.y) < 1e-2) {
+    if (fabsf(currPixelPos.y) < 1e-2f) {
         currPixelPos.y = 0;
     }
 
@@ -224,7 +214,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
 
         bool surfaceBackface = dot(normal, shadingPosToLightNormalized) < 0.0f;
         bool lightBackface = (!sampledEnv) && (dot(lightNormal, -shadingPosToLightNormalized) < 0.0f);
-        if (!surfaceBackface && !lightBackface) {
+        if (!surfaceBackface && !lightBackface && t_max > EPSILON3) {
             float bsdfPDF;
 
             pdf_eval(
@@ -278,7 +268,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
 
             bool occluded = traceVisibility(
                 params,
-                Ray((shadingPos + (dot(shadingPosToLightNormalized, geoNormal) > 0.0f ? geoNormal : -geoNormal) * RAY_EPSILON), shadingPosToLightNormalized),
+                Ray((shadingPos + (dot(shadingPosToLightNormalized, geoNormal) > 0.0f ? geoNormal : -geoNormal) * VIS_EPSILON), shadingPosToLightNormalized),
                 t_max * (1.0f - EPSILON2)
             );
 
@@ -381,6 +371,10 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
 }
     for (int depth = 1; depth < params.max_depth; depth++)
     {   
+        
+        optixMakeNopHitObject();
+        optixReorder(0u, 0u);
+        
         SurfaceHit hitData = traceClosestNoSER(params, r);
         if (!hitData.isHit) // ENVIRONMENT
         {
@@ -615,6 +609,13 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
             }
         }
 
+        float lum = luminance(throughput);
+        float p = clamp(lum, 0.05f, 1.0f);
+
+        if (rand(&localState) > p)   // survive with probability p
+        {
+            goto finalize_pixel;
+        }
 
         if (!currDelta) {
             float3 lightNormal;
@@ -648,7 +649,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
 
             bool surfaceBackface = dot(normal, shadingPosToLightNormalized) < 0.0f;
             bool lightBackface = (!sampledEnv) && (dot(lightNormal, -shadingPosToLightNormalized) < 0.0f);
-            if (!surfaceBackface && !lightBackface) {
+            if (!surfaceBackface && !lightBackface && t_max > EPSILON3) {
                 float bsdfPDF;
 
                 pdf_eval(
@@ -706,7 +707,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
 
                 bool occluded = traceVisibility(
                     params,
-                    Ray((shadingPos + (dot(shadingPosToLightNormalized, geoNormal) > 0.0f ? geoNormal : -geoNormal) * RAY_EPSILON), shadingPosToLightNormalized),
+                    Ray((shadingPos + (dot(shadingPosToLightNormalized, geoNormal) > 0.0f ? geoNormal : -geoNormal) * VIS_EPSILON), shadingPosToLightNormalized),
                     t_max * (1.0f - EPSILON2)
                 );
 
@@ -765,13 +766,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
             }
         }
 
-        float lum = luminance(throughput);
-        float p = clamp(lum, 0.05f, 1.0f);
 
-        if (rand(&localState) > p)   // survive with probability p
-        {
-            goto finalize_pixel;
-        }
         throughput /= p;
         if (pathRcVertexIndex != FLAG_CANDIDATE_GEN_RC_INDEX_UNFOUND && depth + 1> pathRcVertexIndex)
             suffixThroughput /= p;
@@ -801,16 +796,11 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
         #if DEBUG_MODE == 1
         lastPOS_GETRIDOFME = shadingPos;
         #endif
-
-        optixReorder(1u, 0u);
     }
 
 finalize_pixel:
     if (w_sum <= 0.0f) {
-        restir.reservoir.setW(pixelIdx, 1.0f);
-        restir.reservoir.setCachedJacobian(pixelIdx, -1.0f);
-        restir.reservoir.setPathFlags(pixelIdx, packPathFlags(1, 0, 0, 0));
-        restir.reservoir.setF(pixelIdx, 0u); // empty sample: zero contribution, not last-cycle stale radiance
+        restir.reservoir.saveReservoirGatedOut(pixelIdx, packPathFlags(1, 0, 0, 0), 1.0f);
         return;
     }
 
@@ -829,6 +819,12 @@ finalize_pixel:
     );
 }
 
+// ============================================================================================
+// LEGACY single-launch temporal reuse. Superseded by the two-launch split below
+// (__raygen__restirTemporalForward + __raygen__restirTemporalBackwardResolve), which is the
+// default path in renderFrameRestir. Kept intact (with its SBT entry) as a reference; it is
+// no longer launched. Do not delete.
+// ============================================================================================
 extern "C" __global__ void __raygen__restirTemporalReuse() {
     const CommonParams& params = allParams.common; // gets compiled out, so not taking up registers
     const RestirCommonParams& restir = allParams.restir; // gets compiled out, so not taking up registers
@@ -1074,12 +1070,232 @@ extern "C" __global__ void __raygen__restirTemporalReuse() {
         if (isnan(W_final) || isinf(W_final)) W_final = 0.0f;
 
         if (curr_M == 0 || W_final == 0.0f) {
+            restir.reservoir.saveReservoirGatedOut(pixelIdx, packPathFlags(1, 0, 0, 0), 0.0f);
+        } else {
+            // Only M and W change (both necessary partial updates; F/geo/jacobian kept).
+            restir.reservoir.setPathFlags(pixelIdx, packPathFlags(new_M, curr_pathLength, curr_rcVertexIndex, curr_type));
+            restir.reservoir.setW_noCS(pixelIdx, W_final);
+        }
+    }
+}
+
+extern "C" __global__ void __raygen__restirTemporalForward() {
+    const CommonParams& params = allParams.common;
+    const RestirCommonParams& restir = allParams.restir; 
+
+    uint3 launch_index = optixGetLaunchIndex();
+    uint32_t x = launch_index.x;
+    uint32_t y = launch_index.y;
+    int pixelIdx = y*params.w + x;
+
+    half2 mv = restir.gbuffer.getMV(pixelIdx);
+    int2 historyCoord = make_int2(-1, -1);
+    bool ret = true;
+
+    uint32_t mvBits = reinterpret_cast<const uint32_t&>(mv);
+    if (mvBits != 0xFFFFFFFF) {
+        if (isHistoryValid(allParams, make_int2(x, y), mv, historyCoord)) {
+            ret = false;
+        }
+        #if TEMPORAL_USE_DUAL_MV == 1
+        else {
+            mv = restir.gbuffer.getDualMV(pixelIdx);
+            if (isHistoryValid(allParams, make_int2(x, y), mv, historyCoord)) {
+                ret = false;
+            }
+        }
+        #endif
+    }
+
+    if (ret) {
+        // no valid history: sentinel index so the resolve launch skips this pixel
+        restir.temporalFwd.setRecord(pixelIdx, 0xFFFFFFFFu, f3(0), 0.0f, 0.0f);
+        return;
+    }
+
+    uint32_t historyIdx = historyCoord.x + historyCoord.y * params.w;
+
+    uint32_t hist_M_int, hist_pathLength, hist_rcVertexIndex;
+    TechniqueType hist_type;
+    uint32_t hist_rcPrimID;
+    float2 hist_rcBarycentrics;
+    float3 hist_rcWi;
+    float3 hist_rcRadiance;
+    uint32_t hist_rcInstanceID;
+    float hist_cachedJacobianDenom;
+    float hist_cachedNeePdf;
+    restir.lastFrameReservoir.getShiftDescriptor(historyIdx,
+        hist_M_int, hist_pathLength, hist_rcVertexIndex, hist_type,
+        hist_rcPrimID, hist_rcBarycentrics, hist_rcWi, hist_rcRadiance, hist_rcInstanceID,
+        hist_cachedJacobianDenom, hist_cachedNeePdf);
+
+    uint32_t hist_seed = restir.lastFrameReservoir.getSeed_notstreaming(historyIdx);
+
+    bool doFwd = (hist_M_int > 0 && hist_cachedJacobianDenom != -1.0f);
+
+    const uint32_t fwd_replayRecon = (hist_rcVertexIndex == FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY);
+    optixReorder((doFwd << 5) | (fwd_replayRecon << 4) | (hist_type & 0xFu), 6u);
+
+    ShiftResult fwdResult;
+    if (doFwd) {
+        fwdResult = evaluateHybridShift<false>(
+            allParams,
+            x, y,
+            hist_seed, hist_pathLength, hist_rcVertexIndex, hist_type,
+            hist_rcPrimID, hist_rcInstanceID, hist_rcBarycentrics, hist_rcWi, hist_rcRadiance,
+            hist_cachedNeePdf, hist_cachedJacobianDenom
+        );
+
+        if (fwdResult.isValid && fwdResult.new_cached_jacobian < EPSILON3) {
+            fwdResult = {false, f3(0), 0.0f, 0.0f};
+        }
+    } else {
+        fwdResult = {false, f3(0), 0.0f, 0.0f};
+    }
+
+    restir.temporalFwd.setRecord(pixelIdx, historyIdx,
+        fwdResult.contribution, fwdResult.jacobian, fwdResult.new_cached_jacobian);
+}
+
+extern "C" __global__ void __raygen__restirTemporalBackwardResolve() {
+    const CommonParams& params = allParams.common;
+    const RestirCommonParams& restir = allParams.restir;
+
+    uint3 launch_index = optixGetLaunchIndex();
+    uint32_t x = launch_index.x;
+    uint32_t y = launch_index.y;
+    int pixelIdx = y*params.w + x;
+
+    uint32_t historyIdx;
+    ShiftResult fwdResult;
+    restir.temporalFwd.getRecord(pixelIdx, historyIdx,
+        fwdResult.contribution, fwdResult.jacobian, fwdResult.new_cached_jacobian);
+
+    if (historyIdx == 0xFFFFFFFFu)
+        return; // no valid history
+
+    // fwd_isValid was not stored: the forward path guarantees isValid <=> ncj >= EPSILON3.
+    fwdResult.isValid = (fwdResult.new_cached_jacobian >= EPSILON3);
+
+    int2 historyCoord = make_int2((int)(historyIdx % params.w), (int)(historyIdx / params.w));
+
+#if USE_DUPLICATION_MAP
+    uint8_t dupe_val = __ldg(&restir.duplication_map[historyIdx]);
+    float D = (float)dupe_val / 255.0f;
+    float cCap = lerp(LERP_MCAP, 1.0f, powf(D, 0.1f));
+#else
+    float cCap = LERP_MCAP;
+#endif
+
+    uint32_t hist_M_int, hist_pathLength, hist_rcVertexIndex;
+    TechniqueType hist_type;
+    uint32_t hist_rcPrimID;
+    float2 hist_rcBarycentrics;
+    float3 hist_rcWi;
+    float3 hist_rcRadiance;
+    uint32_t hist_rcInstanceID;
+    float hist_cachedJacobianDenom;
+    float hist_cachedNeePdf;
+    restir.lastFrameReservoir.getShiftDescriptor(historyIdx,
+        hist_M_int, hist_pathLength, hist_rcVertexIndex, hist_type,
+        hist_rcPrimID, hist_rcBarycentrics, hist_rcWi, hist_rcRadiance, hist_rcInstanceID,
+        hist_cachedJacobianDenom, hist_cachedNeePdf);
+
+    float hist_M = fminf(cCap, hist_M_int);
+    uint32_t hist_seed = restir.lastFrameReservoir.getSeed_notstreaming(historyIdx);
+
+    uint32_t curr_M, curr_pathLength, curr_rcVertexIndex;
+    TechniqueType curr_type;
+    uint32_t curr_rcPrimID;
+    float2 curr_rcBarycentrics;
+    float3 curr_rcWi;
+    float3 curr_rcRadiance;
+    uint32_t curr_rcInstanceID;
+    float curr_cachedJacobianDenom;
+    float curr_cachedNeePdf;
+    restir.reservoir.getShiftDescriptor(pixelIdx,
+        curr_M, curr_pathLength, curr_rcVertexIndex, curr_type,
+        curr_rcPrimID, curr_rcBarycentrics, curr_rcWi, curr_rcRadiance, curr_rcInstanceID,
+        curr_cachedJacobianDenom, curr_cachedNeePdf);
+
+    float curr_W; float3 curr_F;
+    restir.reservoir.getWF(pixelIdx, curr_W, curr_F);
+    float curr_p_hat = targetFunction(curr_F);
+    uint32_t curr_seed = restir.reservoir.getSeed_notstreaming(pixelIdx);
+
+    uint32_t new_M = curr_M + (uint32_t)hist_M;
+    float hist_W; float3 hist_F;
+    restir.lastFrameReservoir.getWF(historyIdx, hist_W, hist_F);
+    float hist_p_hat = targetFunction(hist_F);
+
+    ShiftResult bwdResult;
+    bool needs_bwd_shift = (curr_cachedJacobianDenom != -1.0f);
+    
+    // SER coherence hint: [do-shift][replay-vs-recon][full 4-bit path type]. See Forward kernel.
+    const uint32_t bwd_replayRecon = (curr_rcVertexIndex == FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY);
+    optixReorder((needs_bwd_shift << 5) | (bwd_replayRecon << 4) | (curr_type & 0xFu), 6u);
+
+    if (needs_bwd_shift) {
+        bwdResult = evaluateHybridShift<true>(
+            allParams,
+            historyCoord.x, historyCoord.y,
+            curr_seed, curr_pathLength, curr_rcVertexIndex, curr_type,
+            curr_rcPrimID, curr_rcInstanceID, curr_rcBarycentrics, curr_rcWi, curr_rcRadiance,
+            curr_cachedNeePdf, curr_cachedJacobianDenom
+        );
+    } else {
+        bwdResult = {false, f3(0), 0.0f, 0.0f};
+    }
+
+    float w_tentative = 0.0f;
+    float mis_weight_curr = 1.0f;
+
+    float fwd_phat = targetFunction(fwdResult.contribution);
+    if (fwdResult.isValid) {
+        float denom_hist = (curr_M * fwd_phat * fwdResult.jacobian) + (hist_M * hist_p_hat);
+        if (denom_hist > 0.0f) {
+            float mis_weight_hist = (hist_M * hist_p_hat) / denom_hist;
+            w_tentative = mis_weight_hist * fwd_phat * hist_W * fwdResult.jacobian;
+        }
+    }
+
+    float bwd_phat = targetFunction(bwdResult.contribution);
+    if (bwdResult.isValid) {
+        float denom_curr = (curr_M * curr_p_hat) + (hist_M * bwd_phat * bwdResult.jacobian);
+        if (denom_curr > 0.0f) {
+            mis_weight_curr = (curr_M * curr_p_hat) / denom_curr;
+        }
+    }
+
+    float w_curr_weighted = mis_weight_curr * curr_W * curr_p_hat;
+
+    float w_sum = w_curr_weighted + w_tentative;
+    RNGState refreshedLocalState = load_rng(hash_uint32(pixelIdx), hash_uint32(params.frame_index), hash_uint32(0), nullptr);
+
+    bool history_won = false;
+    if (w_sum > 0.0f && rand(&refreshedLocalState) < (w_tentative / w_sum)) {
+        history_won = true;
+    }
+
+    if (history_won) {
+        float W_final = (fwd_phat > 0.0f) ? (w_sum / fwd_phat) : 0.0f;
+        if (isnan(W_final) || isinf(W_final)) W_final = 0.0f;
+
+        restir.reservoir.saveReservoirAll(
+            pixelIdx, W_final, fwdResult.contribution, hist_seed, new_M,
+            hist_pathLength, hist_rcVertexIndex, hist_type, hist_rcInstanceID, hist_rcPrimID,
+            hist_rcBarycentrics, hist_rcWi, hist_rcRadiance, fwdResult.new_cached_jacobian, hist_cachedNeePdf
+        );
+    } else {
+        float W_final = (curr_p_hat > 0.0f) ? (w_sum / curr_p_hat) : 0.0f;
+        if (isnan(W_final) || isinf(W_final)) W_final = 0.0f;
+
+        if (curr_M == 0 || W_final == 0.0f) {
             restir.reservoir.setPathFlags(pixelIdx, packPathFlags(1, 0, 0, 0));
             restir.reservoir.setW_noCS(pixelIdx, 0.0f);
-            restir.reservoir.setCachedJacobian(pixelIdx, -1.0f); // gate out of subsequent shifts, matching the candidate-gen empty case
-            restir.reservoir.setF(pixelIdx, 0u);                 // avoid stale radiance leaking into p_hat
+            restir.reservoir.setCachedJacobian(pixelIdx, -1.0f);
+            restir.reservoir.setF(pixelIdx, 0u);
         } else {
-            // Only M changes; repack from the fields we already unpacked (equivalent to updateM).
             restir.reservoir.setPathFlags(pixelIdx, packPathFlags(new_M, curr_pathLength, curr_rcVertexIndex, curr_type));
             restir.reservoir.setW_noCS(pixelIdx, W_final);
         }
@@ -1125,18 +1341,10 @@ extern "C" __global__ void __raygen__restirSpatialReuse() {
         && (self_M > 0u)
         && (self_cachedJacobian != -1.0f)
         && (reinterpret_cast<const uint32_t&>(mv) != 0xFFFFFFFF);
-    
 
-
-    if (params.debugVersion == 1) {
-        // fold the shift's full-replay/reconnection sort into this reorder (self_rcVertexIndex
-        // already loaded); shift skips its own entry reorder under debugVersion==1
-        bool isFullReplay = (self_rcVertexIndex == FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY);
-        uint32_t hint = isFullReplay | (selfShiftable << 1u);
-        optixReorder(hint, 2u);
-    } else {
-        optixReorder(selfShiftable ? 0xFFFFFFFFu : 0u, 1);
-    }
+    // SER coherence hint: [do-shift][replay-vs-recon][full 4-bit path type]. See Forward kernel.
+    const uint32_t self_replayRecon = (self_rcVertexIndex == FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY);
+    optixReorder(((uint32_t)selfShiftable << 5) | (self_replayRecon << 4) | (self_type & 0xFu), 6u);
 
     ShiftResult result;
 

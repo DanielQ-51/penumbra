@@ -45,9 +45,9 @@ __device__ __forceinline__ SurfaceHit traceClosestSER(
         // although this is better than invoking, this is still not optimal.
         // This requires an whole triangle intersection sequence, but it is faster than the context switch
         // that comes with a non-empty closest hit shader
-        hit.barycentrics = getBarycentrics(params.shadeContext, hit.primId, r, hit.instanceId);
+        //hit.barycentrics = getBarycentrics(params.shadeContext, hit.primId, r, hit.instanceId);
 
-        //hit.barycentrics = optixHitObjectGetTriangleBarycentrics();
+        hit.barycentrics = optixHitObjectGetTriangleBarycentrics();
 
         reorderKey = 1;
     } else {
@@ -84,9 +84,9 @@ __device__ __forceinline__ SurfaceHit traceClosestHitObjSER(
         // although this is better than invoking, this is still not optimal.
         // This requires an whole triangle intersection sequence, but it is faster than the context switch
         // that comes with a non-empty closest hit shader
-        hit.barycentrics = getBarycentrics(params.shadeContext, hit.primId, r, hit.instanceId);
+        //hit.barycentrics = getBarycentrics(params.shadeContext, hit.primId, r, hit.instanceId);
 
-        //hit.barycentrics = optixHitObjectGetTriangleBarycentrics();
+        hit.barycentrics = optixHitObjectGetTriangleBarycentrics();
     }
 
     optixReorder();
@@ -153,7 +153,10 @@ __device__ __forceinline__ SurfaceHit traceClosestNoSER(
         hit.instanceId = optixHitObjectGetInstanceId();
 
         // although this is better than invoking, this is still not optimal.
-        hit.barycentrics = getBarycentrics(params.shadeContext, hit.primId, r, hit.instanceId);
+
+        hit.barycentrics = optixHitObjectGetTriangleBarycentrics();
+        
+        //printf("bary: (%f, %f)\n", hit.barycentrics.x, hit.barycentrics.y);
     }
 
     return hit;
@@ -179,7 +182,7 @@ __device__ __forceinline__ bool traceVisibility(
     optixTraverse(
         params.bvh_handle,
         r.origin, r.direction,
-        EPSILON, targetDistance, 0.0f, 
+        0.0f, targetDistance, 0.0f, 
         OptixVisibilityMask(255),
         OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_ANYHIT, 
         0, 1, 0

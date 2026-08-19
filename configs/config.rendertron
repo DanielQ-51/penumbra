@@ -3,6 +3,7 @@ Name: render
 MaterialsFile: configs/materials.rendertron
 
 EnvMap: assets/environment/lakeside_sunrise_2k.exr
+EnvMap: assets/environment/black.exr
 EnvMap Rotation: 130.0
 
 width: 4096
@@ -52,17 +53,18 @@ Camera FocalDist: 0.0
 Camera FOV: 50.0
 
 Pinhole Camera: true
-Camera Position: -7.40743 1.59222 -0.858258
-Camera Rotation: 12.2 -100.69 0.0
+Camera Position: 0.0 0.0 6.5
+Camera Rotation: 6.5 0.0 0.0
 Camera Apeture: 0.0
 Camera FocalDist: 0.0
 Camera FOV: 40.0
 
 Meshes (path; multiplier * emission; materialID):
 assets/scenedata/cornellbox/boxOpenBack.obj; 0.0 * (0.0, 0.0, 0.0); 2
-assets/scenedata/cornellbox/leftBox.obj; 0.0 * (0.0, 0.0, 0.0); 4
-assets/scenedata/cornellbox/bunny.obj; 0.0 * (0.0, 0.0, 0.0); 5
-assets/scenedata/cornellbox/leftteapot.obj; 0.0 * (0.0, 0.0, 0.0); 38
+.assets/scenedata/cornellbox/leftBox.obj; 0.0 * (0.0, 0.0, 0.0); 4
+assets/scenedata/cornellbox/leftBox.obj; 0.0 * (0.0, 0.0, 0.0); 2
+.assets/scenedata/cornellbox/bunny.obj; 0.0 * (0.0, 0.0, 0.0); 5
+.assets/scenedata/cornellbox/leftteapot.obj; 0.0 * (0.0, 0.0, 0.0); 38
 .assets/scenedata/cornellbox/dragon.obj; 0.0 * (0.0, 0.0, 0.0); 5
 assets/scenedata/cornellbox/rightBox.obj; 0.0 * (0.0, 0.0, 0.0); 6
 .assets/scenedata/cornellbox/rightBox.obj; 0.0 * (0.0, 0.0, 0.0); 2

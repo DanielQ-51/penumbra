@@ -30,8 +30,9 @@
 // ideally should be decoupled from ray epsilon type things; look into this
 __device__ __constant__ float EPSILON = 0.0000001f;
 __device__ __constant__ float EPSILON3 = 0.001f;
-__device__ __constant__ float EPSILON2 = 0.001f;
-__device__ __constant__ float RAY_EPSILON = 0.00001f;
+__device__ __constant__ float EPSILON2 = 0.01f;
+__device__ __constant__ float RAY_EPSILON = 0.0001f;
+__device__ __constant__ float VIS_EPSILON = 0.0001f;
 __device__ __constant__ float PI = 3.141592f;
 __device__ __constant__ float INVPI = 0.3183098f;
 

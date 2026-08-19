@@ -27,10 +27,14 @@ struct OptixEngineState {
     OptixShaderBindingTable sbt_restirCandidate = {};
     OptixShaderBindingTable sbt_restirSpatial = {};
     OptixShaderBindingTable sbt_restirTemporal = {};
+    OptixShaderBindingTable sbt_restirTemporalFwd = {};
+    OptixShaderBindingTable sbt_restirTemporalBwd = {};
     OptixProgramGroup raygenUnidirectionalProgramGroup = nullptr;
     OptixProgramGroup raygenRestirCandidateProgramGroup = nullptr;
     OptixProgramGroup raygenRestirSpatialProgramGroup = nullptr;
     OptixProgramGroup raygenRestirTemporalProgramGroup = nullptr;
+    OptixProgramGroup raygenRestirTemporalFwdProgramGroup = nullptr;
+    OptixProgramGroup raygenRestirTemporalBwdProgramGroup = nullptr;
     OptixProgramGroup missProgramGroup = nullptr;
     OptixProgramGroup hitgroupProgramGroup = nullptr;
     OptixModule module = nullptr;
@@ -71,6 +75,7 @@ struct RestirCommonParams {
     short2* reuseTextures[NUM_REUSE_TEXTURES];
     uint32_t reuseTextureSizes[NUM_REUSE_TEXTURES];
     ShiftResultBuffer shiftResultBuffer[NUM_REUSE_TEXTURES];
+    TemporalFwdBuffer temporalFwd; // inter-launch record for the two-launch temporal split
     DenoiserGuides denoiserGuides;
 };
 

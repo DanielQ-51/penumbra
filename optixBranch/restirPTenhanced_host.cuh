@@ -36,6 +36,7 @@ struct RestirState {
     void* sr1Memory = nullptr;
     void* sr2Memory = nullptr;
     void* sr3Memory = nullptr;
+    void* temporalFwdMemory = nullptr;
     short2* reuseTexture1 = nullptr;
     short2* reuseTexture2 = nullptr;
     short2* reuseTexture3 = nullptr;
@@ -70,6 +71,9 @@ __host__ void setupRestirState(const CommonParams& commonParams, RestirState& s,
     s.sr2Memory = allocateShiftResultBuffer(shiftResultBuffer2, commonParams.w * commonParams.h);
     s.sr3Memory = allocateShiftResultBuffer(shiftResultBuffer3, commonParams.w * commonParams.h);
 
+    TemporalFwdBuffer temporalFwdBuffer;
+    s.temporalFwdMemory = allocateTemporalFwdBuffer(temporalFwdBuffer, commonParams.w * commonParams.h);
+
     RestirCommonParams restirParams = {};
     restirParams.reservoir          = reservoir1;
     restirParams.lastFrameReservoir = reservoir2;
@@ -84,6 +88,7 @@ __host__ void setupRestirState(const CommonParams& commonParams, RestirState& s,
     restirParams.shiftResultBuffer[0] = shiftResultBuffer1;
     restirParams.shiftResultBuffer[1] = shiftResultBuffer2;
     restirParams.shiftResultBuffer[2] = shiftResultBuffer3;
+    restirParams.temporalFwd          = temporalFwdBuffer;
     restirParams.denoiserGuides       = denoiserGuides;
 
     allParams.restir = restirParams;
@@ -126,6 +131,7 @@ __host__ void freeRestirState(RestirState& s) {
     cudaFree(s.reuseTexture2);
     cudaFree(s.reuseTexture3);
     cudaFree(s.sr1Memory);
+    cudaFree(s.temporalFwdMemory);
     cudaFree(s.sr2Memory);
     cudaFree(s.sr3Memory);
 }
@@ -168,10 +174,16 @@ __host__ void renderFrameRestir(
         allParams.restir.lastFrameReservoir, allParams.restir.duplication_map, w, h);
 #endif
 
-    // 2) Temporal reuse (skipped on frame 0 -- no history yet)
+    // 2) Temporal reuse (skipped on frame 0 -- no history yet). Two-launch split: forward
+    // shift, then backward shift + MIS + resolve. Each launch inlines evaluateHybridShift
+    // ONCE vs twice single-launch -> ~5% on sponza. The legacy single-launch kernel
+    // (__raygen__restirTemporalReuse) and its SBT entry (sbt_restirTemporal) are kept but no
+    // longer launched.
     if (frame > 0) {
         optixLaunch(engineState.pipeline, stream, d_params, sizeof(PipelineParams),
-                    &engineState.sbt_restirTemporal, w, h, 1);
+                    &engineState.sbt_restirTemporalFwd, w, h, 1);
+        optixLaunch(engineState.pipeline, stream, d_params, sizeof(PipelineParams),
+                    &engineState.sbt_restirTemporalBwd, w, h, 1);
     }
 
 #if DO_SPATIAL_SHIFT == 1
@@ -210,14 +222,9 @@ __host__ void launch_restir (
     uint32_t frameCount,
     const RenderConfig& config
 ) {
-
     PipelineParams allParams = {};
     allParams.common = commonParams;
-
-    // All the always-present ReSTIR buffers + d_params + overlay/dup wiring now
-    // live in setupRestirState (shared with the profiler). Local aliases keep
-    // the launcher-specific code below (denoiser, equal-time, save, memset
-    // init, teardown) reading exactly as before.
+    
     RestirState state;
     setupRestirState(commonParams, state, allParams);
 
@@ -233,10 +240,6 @@ __host__ void launch_restir (
 
 #if USE_DENOISER == 1
     // ---- OptiX TEMPORAL denoiser (albedo + geometric-normal guides + flow) ----
-    // NOTE: OptiX has drifted a couple of these fields across versions (e.g.
-    // denoiseAlpha lives in OptixDenoiserOptions on 8/9, and was in
-    // OptixDenoiserParams on 7.x). If a field errors, that's the culprit; flip
-    // USE_DENOISER to 0 to fall straight back to the raw path.
     OptixDenoiser denoiser = nullptr;
     {
         OptixDenoiserOptions dopt = {};
@@ -295,7 +298,6 @@ __host__ void launch_restir (
     //TurntableCameraAnimation animation = TurntableCameraAnimation(f3(0.0f, 0.0f, -1.5f), 6.5f, -0.0f, 90.0f, 0.0f);
 #else
     //TurntableCameraAnimation animation = TurntableCameraAnimation(f3(0.0f, 0.0f, -1.5f), 6.5f, -0.36f, 90.0f, 0.0f);
-    //OrbitCameraAnimation animation = OrbitCameraAnimation(f3(0.0f, 1.0f, 0.0f), 2.5f, -0.5f, 90.0f, -20.0f);
 #endif
     //LinearCameraAnimation animation = LinearCameraAnimation(commonParams.camera.cameraOrigin, f3(commonParams.camera.xRot, commonParams.camera.yRot, commonParams.camera.zRot), f3(0.00f, 0.02f, 0.0f) ,f3());
     
@@ -315,7 +317,9 @@ __host__ void launch_restir (
         rotDelta
     );
 
-    animation.update(allParams.common.camera, 0);
+    //OrbitCameraAnimation animation = OrbitCameraAnimation(f3(0.0f, 1.0f, 0.0f), 2.5f, -0.5f, 90.0f, -20.0f);
+
+    //animation.update(allParams.common.camera, 0);
 
     dim3 blockSize(32, 8);  
     dim3 gridSize((commonParams.w+31)/32, (commonParams.h+7)/8);

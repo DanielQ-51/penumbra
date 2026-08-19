@@ -30,9 +30,7 @@
 // for that arm; `label` is shown in the report. Arm 0 is the baseline every
 // other arm is compared against.
 static const ProfileArm PROFILE_ARMS[] = {
-    { "baseline",  0 },
-    { "spatial combined 2-bit reorder",  1 },
-    // { "variant 2", 2 },
+    { "baseline", 0 },
 };
 static const int NUM_PROFILE_ARMS = (int)(sizeof(PROFILE_ARMS) / sizeof(PROFILE_ARMS[0]));
 

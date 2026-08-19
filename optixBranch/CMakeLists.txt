@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.25)  # CUDA_OPTIX_COMPILATION property requires >= 3.25
 
 project(OptixExperiment LANGUAGES C CXX CUDA)
 
@@ -17,12 +17,33 @@ find_package(CUDAToolkit REQUIRED)
 set(OPTIX_INCLUDE_DIR "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.1.0/include")
 
 # ==============================================================================
-# 1. COMPILE THE DEVICE CODE TO PTX
+# 0. DEVICE MODULE FORMAT: OptiX-IR vs PTX
+# ==============================================================================
+# ON  -> compile device modules to OptiX-IR (native CMake CUDA_OPTIX_COMPILATION;
+#        no -rdc, no hand-rolled nvcc, so the util.cuh __constant__ globals do NOT
+#        need to be touched). Also defines OPTIX_IR_DIAGNOSTIC (validation mode on).
+# OFF -> original PTX path, unchanged.
+option(USE_OPTIX_IR "Compile device modules to OptiX-IR instead of PTX" ON)
+# Validation mode + detailed create/link logs. Defaults ON while bringing OptiX-IR up;
+# turn OFF (-DOPTIX_VALIDATION=OFF) once the pipeline links, to profile without overhead.
+option(OPTIX_VALIDATION "Enable OptiX validation mode + verbose module/pipeline logs" ${USE_OPTIX_IR})
+
+if(USE_OPTIX_IR)
+    set(OPTIX_DEVICE_COMPILE_PROP CUDA_OPTIX_COMPILATION)
+    set(OPTIX_DEVICE_MODULE_EXT   "optixir")
+else()
+    set(OPTIX_DEVICE_COMPILE_PROP CUDA_PTX_COMPILATION)
+    set(OPTIX_DEVICE_MODULE_EXT   "ptx")
+endif()
+message(STATUS "Device modules: ${OPTIX_DEVICE_MODULE_EXT} (USE_OPTIX_IR=${USE_OPTIX_IR})")
+
+# ==============================================================================
+# 1. COMPILE THE DEVICE CODE (PTX or OptiX-IR per USE_OPTIX_IR)
 # ==============================================================================
 
-# Treat the megakernel as an "OBJECT" library and tell CMake to output PTX
+# Treat the megakernel as an "OBJECT" library and tell CMake to emit the device module
 add_library(optix_ptx_renderer OBJECT renderer.cu)
-set_property(TARGET optix_ptx_renderer PROPERTY CUDA_PTX_COMPILATION ON)
+set_property(TARGET optix_ptx_renderer PROPERTY ${OPTIX_DEVICE_COMPILE_PROP} ON)
 
 target_include_directories(optix_ptx_renderer PRIVATE
     ../include
@@ -37,9 +58,9 @@ target_compile_options(optix_ptx_renderer PRIVATE
 )
 
 
-# --- PTX MODULE 2: ReSTIR Enhanced Shaders ---
+# --- DEVICE MODULE 2: ReSTIR Enhanced Shaders ---
 add_library(optix_ptx_restir OBJECT restirPTenhancedShaders.cu)
-set_property(TARGET optix_ptx_restir PROPERTY CUDA_PTX_COMPILATION ON)
+set_property(TARGET optix_ptx_restir PROPERTY ${OPTIX_DEVICE_COMPILE_PROP} ON)
 
 target_include_directories(optix_ptx_restir PRIVATE
     ../include
@@ -82,8 +103,15 @@ cmake_path(GET CMAKE_CURRENT_SOURCE_DIR PARENT_PATH PARENT_DIR)
 target_compile_definitions(renderer_optix PRIVATE
     ROOT_DIR=\"${PARENT_DIR}\"
     PTX_DIR=\"$<TARGET_FILE_DIR:renderer_optix>\"
+    OPTIX_MODULE_EXT=\"${OPTIX_DEVICE_MODULE_EXT}\"
     TINYGLTF3_ENABLE_FS
 )
+
+if(OPTIX_VALIDATION)
+    # Enables OptiX device-context validation mode + detailed create/link logs (hostSetup.cuh).
+    # Diagnostic: adds per-launch overhead -- turn OPTIX_VALIDATION OFF before profiling.
+    target_compile_definitions(renderer_optix PRIVATE OPTIX_IR_DIAGNOSTIC)
+endif()
 
 
 # ==============================================================================
@@ -101,13 +129,13 @@ target_link_libraries(renderer_optix PRIVATE
 # This automatically copies the generated PTX file and places it right next 
 # to renderer_optix.exe so read_file_to_string("renderer.ptx") finds it instantly!
 add_custom_command(TARGET renderer_optix POST_BUILD
-    # Copy renderer.ptx
+    # Copy the renderer device module (renderer.optixir or renderer.ptx)
     COMMAND ${CMAKE_COMMAND} -E copy
     $<TARGET_OBJECTS:optix_ptx_renderer>
-    $<TARGET_FILE_DIR:renderer_optix>/renderer.ptx
+    $<TARGET_FILE_DIR:renderer_optix>/renderer.${OPTIX_DEVICE_MODULE_EXT}
 
-    # Copy restirPTenhancedShaders.ptx
+    # Copy the ReSTIR device module
     COMMAND ${CMAKE_COMMAND} -E copy
     $<TARGET_OBJECTS:optix_ptx_restir>
-    $<TARGET_FILE_DIR:renderer_optix>/restirPTenhancedShaders.ptx
+    $<TARGET_FILE_DIR:renderer_optix>/restirPTenhancedShaders.${OPTIX_DEVICE_MODULE_EXT}
 )

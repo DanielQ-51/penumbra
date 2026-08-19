@@ -206,6 +206,8 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         #endif
         // depth + 1 is the "index" of the curr vertex, so this stops at y_k-1
         for (int depth = 1; depth + 1 < pathLength; depth++) {
+            optixMakeNopHitObject();
+            optixReorder();
             SurfaceHit hitData = traceClosestNoSER(params, r);
 
             if (!hitData.isHit) {
@@ -307,7 +309,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
             bool isValid = true;
             if (fminf(forwardFootprint, inverseFootprint) >= primaryFootprint) {
-                isValid = false;
+                //isValid = false;
             }
 
             if (!isValid) {
@@ -356,6 +358,9 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             #endif
         }
 
+        optixMakeNopHitObject();
+        optixReorder();
+        
         // now we are on the last bounce. 
         SurfaceHit hitData = traceClosestNoSER(params, r);
 
@@ -636,6 +641,10 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             rcVertexIndex;
         // depth + 1 is the "index" of the curr vertex, so this stops at y_k-1
         for (int depth = 1; depth + 1 < loopBound; depth++) {
+            
+            optixMakeNopHitObject();
+            optixReorder();      
+    
             SurfaceHit hitData = traceClosestNoSER(params, r);
 
             if (!hitData.isHit) {
@@ -756,7 +765,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
             bool isValid = true;
             if (fminf(forwardFootprint, inverseFootprint) >= primaryFootprint) {
-                isValid = false;
+                //isValid = false;
             }
             
             if (!isValid) {
@@ -795,7 +804,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                     DEBUG_PRINTF("SHIFT ABORT [%s]: recon secondary hit scattering pdf zero\n", isReverseShift ? "REVERSE" : "FORWARD");
                 }
                 return {false, f3(0), 0.0f, 0.0f};
-            }
+            }      
 
             throughput *= f_val_bsdf * fabsf(outgoing.z) / pdf_bsdf;
 
@@ -1208,7 +1217,7 @@ __device__ __forceinline__ float3 debugVisualizeTechnique(uint32_t type, uint32_
     if (type & SHIFT_K_IS_D) {
         color = make_float3(1.0f, 0.0f, 0.0f); // Base: Red
     }
-    else if (type & SHIFT_K_IS_D_MINUS_1) {
+    else if (K_is_D_minus_1(type)) {
         color = make_float3(0.0f, 1.0f, 0.0f); // Base: Green
     }
     else if (type & SHIFT_K_LESS_D_MINUS_1) {
@@ -1218,7 +1227,7 @@ __device__ __forceinline__ float3 debugVisualizeTechnique(uint32_t type, uint32_
     // 2. Light Type -> Shift to Secondary Color
     if (type & SHIFT_IS_ENV) {
         if (type & SHIFT_K_IS_D)                 color.y = 1.0f; // Red -> Yellow
-        else if (type & SHIFT_K_IS_D_MINUS_1)    color.z = 1.0f; // Green -> Cyan
+        else if (K_is_D_minus_1(type))    color.z = 1.0f; // Green -> Cyan
         else if (type & SHIFT_K_LESS_D_MINUS_1)  color.x = 1.0f; // Blue -> Magenta
     }
 
@@ -1234,13 +1243,13 @@ __device__ __forceinline__ float3 debugVisualizeTechniqueAndLength(uint32_t type
 
     // 1. Reconnection Depth (K) -> Base Hue
     if (type & SHIFT_K_IS_D)                 color = make_float3(1.0f, 0.0f, 0.0f); // Base: Red
-    else if (type & SHIFT_K_IS_D_MINUS_1)    color = make_float3(0.0f, 1.0f, 0.0f); // Base: Green
+    else if (K_is_D_minus_1(type))    color = make_float3(0.0f, 1.0f, 0.0f); // Base: Green
     else if (type & SHIFT_K_LESS_D_MINUS_1)  color = make_float3(0.0f, 0.0f, 1.0f); // Base: Blue
 
     // 2. Light Type -> Shift to Secondary Hue
     if (type & SHIFT_IS_ENV) {
         if (type & SHIFT_K_IS_D)                 color.y = 1.0f; // Red -> Yellow
-        else if (type & SHIFT_K_IS_D_MINUS_1)    color.z = 1.0f; // Green -> Cyan
+        else if (K_is_D_minus_1(type))    color.z = 1.0f; // Green -> Cyan
         else if (type & SHIFT_K_LESS_D_MINUS_1)  color.x = 1.0f; // Blue -> Magenta
     }
 

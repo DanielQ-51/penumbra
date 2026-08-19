@@ -67,7 +67,7 @@ __device__ __forceinline__ inline ShiftResult perform_K_is_D_minus_1_reconnectio
 
     bool occluded = traceVisibility(
         params,
-        Ray(xkminus1_pos + (dot(xkminus1_to_xk_direction_normalized, xkminus1_normal) > 0.0f ? xkminus1_normal : -xkminus1_normal) * RAY_EPSILON, xkminus1_to_xk_direction_normalized),
+        Ray(xkminus1_pos + (dot(xkminus1_to_xk_direction_normalized, xkminus1_normal) > 0.0f ? xkminus1_normal : -xkminus1_normal) * VIS_EPSILON, xkminus1_to_xk_direction_normalized),
         xkminus1_to_xk_distance * (1.0f - EPSILON2)
     );
 
@@ -318,7 +318,7 @@ __device__ __forceinline__ inline ShiftResult perform_K_less_than_D_minus_1_reco
 
     bool occluded = traceVisibility(
         params,
-        Ray(xkminus1_pos + (dot(xkminus1_to_xk_direction_normalized, xkminus1_normal) > 0.0f ? xkminus1_normal : -xkminus1_normal) * RAY_EPSILON, xkminus1_to_xk_direction_normalized),
+        Ray(xkminus1_pos + (dot(xkminus1_to_xk_direction_normalized, xkminus1_normal) > 0.0f ? xkminus1_normal : -xkminus1_normal) * VIS_EPSILON, xkminus1_to_xk_direction_normalized),
         xkminus1_to_xk_distance * (1.0f - EPSILON2)
     );
 
@@ -528,7 +528,7 @@ __device__ __forceinline__ inline ShiftResult perform_K_is_D_reconnection(
 
     bool occluded = traceVisibility(
         params,
-        Ray(xkminus1_pos + (dot(xkminus1_to_xk_direction_normalized, xkminus1_normal) > 0.0f ? xkminus1_normal : -xkminus1_normal) * RAY_EPSILON, xkminus1_to_xk_direction_normalized),
+        Ray(xkminus1_pos + (dot(xkminus1_to_xk_direction_normalized, xkminus1_normal) > 0.0f ? xkminus1_normal : -xkminus1_normal) * VIS_EPSILON, xkminus1_to_xk_direction_normalized),
         xkminus1_to_xk_distance * (1.0f - EPSILON2)
     );
 

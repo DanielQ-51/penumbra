@@ -20,7 +20,6 @@
 #include <cuda_fp16.h>
 #include <string>
 #include <vector>
-#include <iomanip>
 #include <optix.h>
 #include <optix_stubs.h>
 #include <optix_function_table_definition.h>
@@ -32,7 +31,7 @@
 #define ASSET_PATH(path) (std::string(ROOT_DIR) + "/" + path)
 
 #ifndef PTX_DIR
-#define PTX_DIR "" 
+#define PTX_DIR ""
 #endif
 
 __host__ std::string read_file_to_string(const std::string& filepath) {
@@ -108,6 +107,12 @@ __host__ int initOptixSystem(OptixEngineState& engineState) {
     options.logCallbackFunction = [](uint32_t level, const char* tag, const char* message, void*) {
         std::cerr << "[" << level << "][" << tag << "]: " << message << std::endl;
     };
+#ifdef OPTIX_IR_DIAGNOSTIC
+    // DIAGNOSTIC ONLY (auto-enabled by the USE_OPTIX_IR CMake option). Surfaces detailed
+    // reasons for module/pipeline failures. Adds per-launch validation overhead -- turn the
+    // USE_OPTIX_IR option OFF (or drop this define) before any profiling run.
+    options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
+#endif
 
     OptixDeviceContext context = nullptr;
     if (optixDeviceContextCreate(cuCtx, &options, &context) != OPTIX_SUCCESS) {
@@ -117,11 +122,16 @@ __host__ int initOptixSystem(OptixEngineState& engineState) {
 
     std::cout << "OptiX Context Created Successfully. Ready to build." << std::endl;
 
+    // Device-module extension: "optixir" when built with -DUSE_OPTIX_IR=ON, else "ptx".
+    // CMake defines OPTIX_MODULE_EXT; default to ptx if some other build path omits it.
+#ifndef OPTIX_MODULE_EXT
+#define OPTIX_MODULE_EXT "ptx"
+#endif
     std::string ptxCode;
     try {
-        std::string ptxPath = std::string(PTX_DIR) + "/renderer.ptx";
-        
-        std::cout << "Loading PTX from: " << ptxPath << std::endl;
+        std::string ptxPath = std::string(PTX_DIR) + "/renderer." OPTIX_MODULE_EXT;
+
+        std::cout << "Loading device module from: " << ptxPath << std::endl;
         ptxCode = read_file_to_string(ptxPath);
         
     } catch (const std::exception& e) {
@@ -131,9 +141,9 @@ __host__ int initOptixSystem(OptixEngineState& engineState) {
 
     std::string restirPTX;
     try {
-        std::string ptxPath = std::string(PTX_DIR) + "/restirPTenhancedShaders.ptx";
-        
-        std::cout << "Loading PTX from: " << ptxPath << std::endl;
+        std::string ptxPath = std::string(PTX_DIR) + "/restirPTenhancedShaders." OPTIX_MODULE_EXT;
+
+        std::cout << "Loading device module from: " << ptxPath << std::endl;
         restirPTX = read_file_to_string(ptxPath);
         
     } catch (const std::exception& e) {
@@ -155,27 +165,48 @@ __host__ int initOptixSystem(OptixEngineState& engineState) {
     pipelineOptions.usesPrimitiveTypeFlags = (OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE);
     pipelineOptions.pipelineLaunchParamsVariableName = "allParams"; 
 
+    // The logString out-params below carry the real compiler/linker diagnostic. The prior
+    // OptiX-IR attempt passed nullptr here, which is why pipeline failures printed no reason.
+    char optixLog[8192];
+    size_t optixLogSize;
+
     OptixModule module = nullptr;
-    optixModuleCreate(
-        context, 
-        &moduleOptions, 
-        &pipelineOptions, 
-        ptxCode.c_str(), 
-        ptxCode.size(), 
-        nullptr, nullptr, 
-        &module
-    );
+    optixLogSize = sizeof(optixLog);
+    {
+        OptixResult res = optixModuleCreate(
+            context,
+            &moduleOptions,
+            &pipelineOptions,
+            ptxCode.c_str(),
+            ptxCode.size(),
+            optixLog, &optixLogSize,
+            &module
+        );
+        if (optixLogSize > 1) std::cerr << "[module renderer log]: " << optixLog << std::endl;
+        if (res != OPTIX_SUCCESS) {
+            std::cerr << "optixModuleCreate(renderer) FAILED: " << optixGetErrorString(res) << std::endl;
+            return -1;
+        }
+    }
 
     OptixModule restirModule = nullptr;
-    optixModuleCreate(
-        context, 
-        &moduleOptions, 
-        &pipelineOptions, 
-        restirPTX.c_str(), 
-        restirPTX.size(), 
-        nullptr, nullptr, 
-        &restirModule
-    );
+    optixLogSize = sizeof(optixLog);
+    {
+        OptixResult res = optixModuleCreate(
+            context,
+            &moduleOptions,
+            &pipelineOptions,
+            restirPTX.c_str(),
+            restirPTX.size(),
+            optixLog, &optixLogSize,
+            &restirModule
+        );
+        if (optixLogSize > 1) std::cerr << "[module restir log]: " << optixLog << std::endl;
+        if (res != OPTIX_SUCCESS) {
+            std::cerr << "optixModuleCreate(restir) FAILED: " << optixGetErrorString(res) << std::endl;
+            return -1;
+        }
+    }
 
     OptixProgramGroupOptions pgOptions = {};
     
@@ -207,19 +238,40 @@ __host__ int initOptixSystem(OptixEngineState& engineState) {
     OptixProgramGroupDesc restirTemporalDesc = {};
     restirTemporalDesc.kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     restirTemporalDesc.raygen.module            = restirModule;
-    restirTemporalDesc.raygen.entryFunctionName = "__raygen__restirTemporalReuse"; 
+    restirTemporalDesc.raygen.entryFunctionName = "__raygen__restirTemporalReuse";
 
-    OptixProgramGroupDesc programGroupDescs[] = { 
-        raygenUnidirectionalDesc, 
+    OptixProgramGroupDesc restirTemporalFwdDesc = {};
+    restirTemporalFwdDesc.kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+    restirTemporalFwdDesc.raygen.module            = restirModule;
+    restirTemporalFwdDesc.raygen.entryFunctionName = "__raygen__restirTemporalForward";
+
+    OptixProgramGroupDesc restirTemporalBwdDesc = {};
+    restirTemporalBwdDesc.kind                     = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+    restirTemporalBwdDesc.raygen.module            = restirModule;
+    restirTemporalBwdDesc.raygen.entryFunctionName = "__raygen__restirTemporalBackwardResolve";
+
+    OptixProgramGroupDesc programGroupDescs[] = {
+        raygenUnidirectionalDesc,
         missDesc,
-        hitgroupDesc, 
+        hitgroupDesc,
         restirCandidateGenDesc,
         restirSpatialDesc,
-        restirTemporalDesc
+        restirTemporalDesc,
+        restirTemporalFwdDesc,
+        restirTemporalBwdDesc
     };
-    OptixProgramGroup programGroups[6];
+    OptixProgramGroup programGroups[8];
 
-    optixProgramGroupCreate(context, programGroupDescs, 6, &pgOptions, nullptr, nullptr, programGroups);
+    optixLogSize = sizeof(optixLog);
+    {
+        OptixResult res = optixProgramGroupCreate(context, programGroupDescs, 8, &pgOptions,
+                                                  optixLog, &optixLogSize, programGroups);
+        if (optixLogSize > 1) std::cerr << "[program groups log]: " << optixLog << std::endl;
+        if (res != OPTIX_SUCCESS) {
+            std::cerr << "optixProgramGroupCreate FAILED: " << optixGetErrorString(res) << std::endl;
+            return -1;
+        }
+    }
 
     OptixProgramGroup raygenUnidirectionalProgramGroup = programGroups[0];
     OptixProgramGroup missProgramGroup                 = programGroups[1];
@@ -227,19 +279,29 @@ __host__ int initOptixSystem(OptixEngineState& engineState) {
     OptixProgramGroup restirCandidateGenGroup          = programGroups[3];
     OptixProgramGroup restirSpatialGroup               = programGroups[4];
     OptixProgramGroup restirTemporalGroup              = programGroups[5];
+    OptixProgramGroup restirTemporalFwdGroup           = programGroups[6];
+    OptixProgramGroup restirTemporalBwdGroup           = programGroups[7];
 
     OptixPipeline pipeline = nullptr;
     OptixPipelineLinkOptions linkOptions = {};
     linkOptions.maxTraceDepth = 1;   // [STACK_FIX] shaders trace via optixTraverse; 0 is UB (was 0)
 
-    optixPipelineCreate(
-        context,
-        &pipelineOptions,
-        &linkOptions,
-        programGroups, 6,
-        nullptr, nullptr,
-        &pipeline
-    );
+    optixLogSize = sizeof(optixLog);
+    {
+        OptixResult res = optixPipelineCreate(
+            context,
+            &pipelineOptions,
+            &linkOptions,
+            programGroups, 8,
+            optixLog, &optixLogSize,
+            &pipeline
+        );
+        if (optixLogSize > 1) std::cerr << "[pipeline link log]: " << optixLog << std::endl;
+        if (res != OPTIX_SUCCESS) {
+            std::cerr << "optixPipelineCreate FAILED: " << optixGetErrorString(res) << std::endl;
+            return -1;
+        }
+    }
 
     // [STACK_FIX] BEGIN - set an explicit pipeline stack size.
     // Previously no stack size was set, so OptiX used a default derived from
@@ -276,15 +338,17 @@ __host__ int initOptixSystem(OptixEngineState& engineState) {
         char header[OPTIX_SBT_RECORD_HEADER_SIZE];
     };
 
-    RaygenRecord rgRecords[4];
-    optixSbtRecordPackHeader(programGroups[0], &rgRecords[0]); 
-    optixSbtRecordPackHeader(programGroups[3], &rgRecords[1]); 
-    optixSbtRecordPackHeader(programGroups[4], &rgRecords[2]); 
-    optixSbtRecordPackHeader(programGroups[5], &rgRecords[3]); 
+    RaygenRecord rgRecords[6];
+    optixSbtRecordPackHeader(programGroups[0], &rgRecords[0]);
+    optixSbtRecordPackHeader(programGroups[3], &rgRecords[1]);
+    optixSbtRecordPackHeader(programGroups[4], &rgRecords[2]);
+    optixSbtRecordPackHeader(programGroups[5], &rgRecords[3]);
+    optixSbtRecordPackHeader(programGroups[6], &rgRecords[4]); // temporal forward
+    optixSbtRecordPackHeader(programGroups[7], &rgRecords[5]); // temporal backward+resolve
 
     CUdeviceptr d_rgRecordArray;
-    cudaMalloc(reinterpret_cast<void**>(&d_rgRecordArray), sizeof(RaygenRecord) * 4);
-    cudaMemcpy(reinterpret_cast<void*>(d_rgRecordArray), rgRecords, sizeof(RaygenRecord) * 4, cudaMemcpyHostToDevice);
+    cudaMalloc(reinterpret_cast<void**>(&d_rgRecordArray), sizeof(RaygenRecord) * 6);
+    cudaMemcpy(reinterpret_cast<void*>(d_rgRecordArray), rgRecords, sizeof(RaygenRecord) * 6, cudaMemcpyHostToDevice);
 
     RaygenRecord hgRecord;
     optixSbtRecordPackHeader(hitgroupProgramGroup, &hgRecord); 
@@ -314,10 +378,12 @@ __host__ int initOptixSystem(OptixEngineState& engineState) {
         return sbt;
     };
 
-    engineState.sbt_unidirectional  = buildMenu(0);
-    engineState.sbt_restirCandidate = buildMenu(1);
-    engineState.sbt_restirSpatial   = buildMenu(2);
-    engineState.sbt_restirTemporal  = buildMenu(3);
+    engineState.sbt_unidirectional    = buildMenu(0);
+    engineState.sbt_restirCandidate   = buildMenu(1);
+    engineState.sbt_restirSpatial     = buildMenu(2);
+    engineState.sbt_restirTemporal    = buildMenu(3);
+    engineState.sbt_restirTemporalFwd = buildMenu(4);
+    engineState.sbt_restirTemporalBwd = buildMenu(5);
 
     engineState.context = context;
     engineState.pipeline = pipeline;
@@ -325,6 +391,8 @@ __host__ int initOptixSystem(OptixEngineState& engineState) {
     engineState.raygenRestirCandidateProgramGroup = restirCandidateGenGroup;
     engineState.raygenRestirSpatialProgramGroup = restirSpatialGroup;
     engineState.raygenRestirTemporalProgramGroup = restirTemporalGroup;
+    engineState.raygenRestirTemporalFwdProgramGroup = restirTemporalFwdGroup;
+    engineState.raygenRestirTemporalBwdProgramGroup = restirTemporalBwdGroup;
     engineState.hitgroupProgramGroup = hitgroupProgramGroup;
     engineState.module = module;
     engineState.restirModule = restirModule;
@@ -345,6 +413,8 @@ __host__ int optixEngineCleanup(OptixEngineState& engineState) {
     optixProgramGroupDestroy(engineState.raygenRestirCandidateProgramGroup);
     optixProgramGroupDestroy(engineState.raygenRestirSpatialProgramGroup);
     optixProgramGroupDestroy(engineState.raygenRestirTemporalProgramGroup);
+    optixProgramGroupDestroy(engineState.raygenRestirTemporalFwdProgramGroup);
+    optixProgramGroupDestroy(engineState.raygenRestirTemporalBwdProgramGroup);
     optixProgramGroupDestroy(engineState.hitgroupProgramGroup);
     optixProgramGroupDestroy(engineState.missProgramGroup);
     optixModuleDestroy(engineState.module);
