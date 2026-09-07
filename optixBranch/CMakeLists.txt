@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.25)  # CUDA_OPTIX_COMPILATION property requires >= 3.25
+cmake_minimum_required(VERSION 3.27)  # CUDA_OPTIX_COMPILATION was added in CMake 3.27
 
 project(OptixExperiment LANGUAGES C CXX CUDA)
 
@@ -10,7 +10,20 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_ARCHITECTURES 89)
+# Select the host GPU by default for local builds, while allowing callers to
+# choose explicit architectures for cross-compilation or distribution builds.
+set(NOVUM_CUDA_ARCHITECTURES "native" CACHE STRING
+    "CUDA architectures, e.g. native, 86, or 86;89")
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES "${NOVUM_CUDA_ARCHITECTURES}")
+endif()
+
+# CUDA 13.3's bundled CCCL rejects MSVC's legacy preprocessor.  Pass the
+# conforming mode through nvcc to the host compiler on Windows.
+if(MSVC)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/Zc:preprocessor>)
+    add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
+endif()
 
 find_package(CUDAToolkit REQUIRED)
 
@@ -83,6 +96,10 @@ add_executable(renderer_optix
     ../src/rng.cu
     ../thirdparty/tinygltf/tiny_gltf_v3.c
 )
+
+# The device-module object targets are consumed by the post-build copy below,
+# so make their build order explicit for Ninja and other parallel generators.
+add_dependencies(renderer_optix optix_ptx_renderer optix_ptx_restir)
 
 # Reach UP one directory to link your shared headers to the host code
 target_include_directories(renderer_optix PRIVATE 
