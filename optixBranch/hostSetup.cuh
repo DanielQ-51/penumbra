@@ -639,6 +639,17 @@ int initRender(OptixEngineState& engineState, string configPath, int renderNumbe
     cout << "scene data read. There are " << gpuScene->hostTriangles.size() << " Triangles and "
          << gpuScene->shadeContext.lightNum << " +1 lights" << endl;
 
+    // ReSTIR needs at least one usable light source.  Without this guard, a
+    // missing environment map plus missing emissive geometry reaches the
+    // device sampler with uninitialized light-sample data and can terminate
+    // the process before the first frame is reported.
+    if (gpuScene->shadeContext.lightSampler.numLights == 0 &&
+        gpuScene->shadeContext.lightSampler.envMap.totalPower <= 1e-3f) {
+        std::cerr << "Error: scene has no usable lights. Provide a valid "
+                  << "environment EXR or emissive mesh before running ReSTIR PT.\n";
+        return 1;
+    }
+
     auto afterRead = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed_seconds_afterRead = afterRead - start;
     std::cout << "Scene read took: " << elapsed_seconds_afterRead.count() << " seconds" << std::endl << endl;
