@@ -58,6 +58,10 @@ There is a substantial amount of engineering on top of the algorithm itself: a f
 <small><i>Water caustics rendered with SPPM.</i></small>
 <br><br>
 
+<img src="savedRenders/smokerender.png" alt="a smoke cloud lit by red and blue lights" width="100%"/>
+<small><i>Heterogeneous Volume Render via NanoVDB, done with delta and ratio tracking.</i></small>
+<br><br>
+
 <img src="savedRenders/windowsil.png" alt="a windowsil scene with a cup of tea and a metal spoon" width="100%"/>
 <small><i>Unidirectional render featuring priority-based nested dielectrics - wood modeled with a layered BSDF (microfacet dielectric over a diffuse textured surface), metal modeled with a microfacet metal.</i></small>
 <br><br>
