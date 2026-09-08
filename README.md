@@ -29,7 +29,7 @@ Novum is a research-oriented GPU rendering engine built to demonstrate the capab
 ## Real-Time: ReSTIR PT (Enhanced)
 
 [![Novum ReSTIR PT (Enhanced) - real-time demo](https://img.youtube.com/vi/ut58LwZ3ITs/hqdefault.jpg)](https://www.youtube.com/watch?v=ut58LwZ3ITs)
-<small><i>Click to watch - Novum's ReSTIR PT (Enhanced) integrator running in real time on a laptop RTX 4060.</i></small>
+<small><br><i>Click to watch - Novum's ReSTIR PT (Enhanced) integrator running in real time on a laptop RTX 4060.</i></small>
 <br><br>
 
 Novum implements ReSTIR PT Enhanced (2026), running in a separate OptiX branch (`optixBranch/`) built around hardware ray tracing and Shader Execution Reordering (SER). It reaches **30–70 fps at 2MP, with no AI upscaling or frame generation, on a laptop RTX 4060** on bottom-of-the-barrel Ada-generation hardware.
