@@ -58,7 +58,7 @@ There is a substantial amount of engineering on top of the algorithm itself: a f
 <small><i>Water caustics rendered with SPPM.</i></small>
 <br><br>
 
-<img src="savedRenders/smokerender.png" alt="a smoke cloud lit by red and blue lights" width="100%"/>
+<img src="savedRenders/smokerender.png" alt="a smoke cloud lit by red and blue lights" width="50%"/>
 <small><i>Heterogeneous Volume Render via NanoVDB, done with delta and ratio tracking.</i></small>
 <br><br>
 
