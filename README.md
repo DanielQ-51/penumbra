@@ -126,7 +126,7 @@ Novum/
 
 ## Building & Running
 
-NOTE: For GLTF usage, it is highly recommended to use the texConv tool to pre-compress textures. The engine relies on this to create pre-computed mip levels. Although the engine is built to read images normally with stb image, that pathway is not tested much.
+NOTE: For GLTF usage, it is highly recommended to use the texConv tool to pre-compress textures. The engine relies on this to create pre-computed mip levels. Although the engine is built to read images normally with stb image (and downsample its own mip levels), that pathway is not tested much.
 
 Both engines use CMake (≥ 3.24) and target CUDA architecture 89 (Ada Lovelace, e.g. RTX 40-series) - edit `CMAKE_CUDA_ARCHITECTURES` in the relevant `CMakeLists.txt` if you're on different hardware.
 
