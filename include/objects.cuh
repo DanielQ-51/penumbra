@@ -246,7 +246,7 @@ struct Camera
     float3 right;
     float3 up;
 
-    __host__ static Camera Pinhole(const float3& cameraOrigin, int w, int h, float xR, float yR, float zR, float FOV, float aajitter = 0.0f)
+    __host__ static Camera Pinhole(const float3& cameraOrigin, int w, int h, float xR, float yR, float zR, float FOV, float aajitter = 1.0f)
     {
         Camera c;
 

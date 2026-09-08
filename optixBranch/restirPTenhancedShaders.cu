@@ -409,7 +409,7 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
                     rcInd = prevDelta ?
                         FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY : // direction copy is impossible if the prev vertex was full specular
                         FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_DIRECTION_COPY; // direction copy for environment map lowers variance
-                    //rcInd = FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY;
+                    rcInd = FLAG_HYBRID_SHIFT_RC_INDEX_K_IS_D_FULL_REPLAY;
                     } else if (pathRcVertexIndex == depth) {
                     // k = d - 1
                     // This means the previous iteration, the previous vertex was marked as the rc vertex, thus, the rcvertexgeometry
@@ -609,14 +609,6 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
             }
         }
 
-        float lum = luminance(throughput);
-        float p = clamp(lum, 0.05f, 1.0f);
-
-        if (rand(&localState) > p)   // survive with probability p
-        {
-            goto finalize_pixel;
-        }
-
         if (!currDelta) {
             float3 lightNormal;
             float3 emission;
@@ -766,7 +758,13 @@ extern "C" __global__ void __raygen__restirCandidateGeneration() {
             }
         }
 
+        float lum = luminance(throughput);
+        float p = clamp(lum, 0.05f, 1.0f);
 
+        if (rand(&localState) > p)   // survive with probability p
+        {
+            goto finalize_pixel;
+        }
         throughput /= p;
         if (pathRcVertexIndex != FLAG_CANDIDATE_GEN_RC_INDEX_UNFOUND && depth + 1> pathRcVertexIndex)
             suffixThroughput /= p;

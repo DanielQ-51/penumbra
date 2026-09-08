@@ -236,7 +236,9 @@ __host__ void launch_naive_unidirectional(
     int numSample,
     bool useMIS,
     int w, int h,
-    float4* __restrict__ colors
+    float4* __restrict__ colors,
+    bool postProcess,
+    float exposure
 )
 {
     dim3 blockSize(16, 16);
@@ -267,6 +269,9 @@ __host__ void launch_naive_unidirectional(
 
     int saveIntervalSamples = 1500;
     Image image = Image(w, h);
+    // Post-processing (exposure/tonemap/gamma) now happens on the GPU in
+    // cleanFormatAndPostProcessImage, so saveImageBMP() must not re-apply it.
+    image.postProcess = false;
     std::vector<float4> h_finalOutput(w * h);
 
     std::cout << "Running Kernels" << std::endl;
@@ -282,9 +287,15 @@ __host__ void launch_naive_unidirectional(
         if ((currSample % saveIntervalSamples == 0 || currSample == numSample-1) && DO_PROGRESSIVERENDER)
         {
             // Launch the formatting kernel to handle averaging, NaNs, and Infs on the GPU
-            cleanAndFormatImage<<<gridSize, blockSize>>>(
-                colors, d_overlay, d_finalOutput, w, h, currSample
-            );
+            if (postProcess) {
+                cleanFormatAndPostProcessImage<<<gridSize, blockSize>>>(
+                    colors, d_overlay, d_finalOutput, w, h, currSample, exposure, image.use_fitted_aces
+                );
+            } else {
+                cleanAndFormatImage<<<gridSize, blockSize>>>(
+                    colors, d_overlay, d_finalOutput, w, h, currSample
+                );
+            }
 
             // Copy the finalized buffer back to the host
             cudaMemcpy(h_finalOutput.data(), d_finalOutput, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
@@ -623,7 +634,9 @@ __host__ void launch_unidirectional(
     int numSample,
     bool useMIS,
     int w, int h,
-    float4* __restrict__ colors
+    float4* __restrict__ colors,
+    bool postProcess,
+    float exposure
 )
 {
     dim3 blockSize(16, 16);
@@ -645,8 +658,20 @@ __host__ void launch_unidirectional(
             freeB / (1024.0*1024),
             totalB / (1024.0*1024));
 
+    // Device buffers for the image formatting kernel. This integrator produces
+    // no overlay, so d_overlay stays zeroed and the kernel's overlay test never fires.
+    float4* d_finalOutput;
+    float4* d_overlay;
+    cudaMalloc(&d_finalOutput, w * h * sizeof(float4));
+    cudaMalloc(&d_overlay, w * h * sizeof(float4));
+    cudaMemset(d_overlay, 0, w * h * sizeof(float4));
+
     int saveIntervalSamples = 10000; // Aligned with wavefront logic
     Image image = Image(w, h);
+    // Post-processing (exposure/tonemap/gamma) now happens on the GPU in
+    // cleanFormatAndPostProcessImage, so saveImageBMP() must not re-apply it.
+    image.postProcess = false;
+    std::vector<float4> h_finalOutput(w * h);
 
     std::cout << "Running Kernels Unidirectional" << std::endl;
 
@@ -663,27 +688,28 @@ __host__ void launch_unidirectional(
         // Save and print progress based on sample count
         if (currSample % saveIntervalSamples == 0)
         {
-            std::vector<float4> h_colors(w * h);
-            cudaMemcpy(h_colors.data(), colors, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
-
-            #pragma omp parallel for // Added openmp pragma here like in your wavefront post-process if you want speed
-            for (int i = 0; i < w; i++)
-            {
-                for (int j = 0; j < h; j++)
-                {
-                    if (isnan(h_colors[i].x) || isnan(h_colors[i].y) || isnan(h_colors[i].z)) {
-                        h_colors[i] = f4(1.0f, 0.0f, 1.0f); // Bright Pink for NaN
-                    }
-                    if (isinf(h_colors[i].x) || isinf(h_colors[i].y) || isinf(h_colors[i].z)) {
-                        h_colors[i] = f4(0.0f, 1.0f, 0.0f); // Bright Green for Inf
-                    }
-                    if (h_colors[image.toIndex(i, j)].x < 0 || h_colors[image.toIndex(i, j)].y < 0 || h_colors[image.toIndex(i, j)].z < 0)
-                        std::cout << "\n" << i << ", " << j << " Negative color written: <" << h_colors[image.toIndex(i, j)].x << ", " << h_colors[image.toIndex(i, j)].y << ", "
-                        << h_colors[image.toIndex(i, j)].z << ">" << std::endl;
-
-                    image.setColor(i, j, h_colors[image.toIndex(i, j)] / (float)(currSample + 1));
-                }
+            // Averaging, NaN/Inf sanitizing and post-processing all happen in the
+            // one formatting kernel, matching the OptiX branch.
+            if (postProcess) {
+                cleanFormatAndPostProcessImage<<<gridSize, blockSize>>>(
+                    colors, d_overlay, d_finalOutput, w, h, currSample, exposure, image.use_fitted_aces
+                );
+            } else {
+                cleanAndFormatImage<<<gridSize, blockSize>>>(
+                    colors, d_overlay, d_finalOutput, w, h, currSample
+                );
             }
+
+            cudaMemcpy(h_finalOutput.data(), d_finalOutput, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
+
+            #pragma omp parallel for
+            for (int i = 0; i < w * h; i++)
+            {
+                int x = i % w;
+                int y = i / w;
+                image.setColor(x, y, h_finalOutput[i]);
+            }
+
             std::string filename = "render.bmp";
             image.saveImageBMP(filename);
             image.saveImageCSV_MONO(0);
@@ -701,6 +727,8 @@ __host__ void launch_unidirectional(
     printf("\n"); // Move to a new line when the render loop finishes completely
     cudaDeviceSynchronize();
     cudaFree(d_rngStates);
+    cudaFree(d_finalOutput);
+    cudaFree(d_overlay);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -2050,7 +2078,8 @@ __host__ void launch_bidirectional(
     int lightNum, int numSample, int w, int h,
     float3 h_sceneCenter, float h_sceneRadius,
     float4* __restrict__ colors, float4* __restrict__ overlay,
-    bool postProcess
+    bool postProcess,
+    float exposure
 )
 {
     // --- SETUP ---
@@ -2090,7 +2119,9 @@ __host__ void launch_bidirectional(
     // Image Object (CPU) & Saving logic from SPPM
     int saveIntervalSamples = 30; // Matches SPPM logic
     Image image = Image(w, h);
-    image.postProcess = postProcess;
+    // Post-processing (exposure/tonemap/gamma) now happens on the GPU in
+    // cleanFormatAndPostProcessImage, so saveImageBMP() must not re-apply it.
+    image.postProcess = false;
     std::vector<float4> h_finalOutput(w * h);
 
     std::cout << "Starting BDPT Render..." << std::endl;
@@ -2118,9 +2149,15 @@ __host__ void launch_bidirectional(
         if (DO_PROGRESSIVERENDER && currSample % saveIntervalSamples == 0)
         {
             // Run the helper kernel (Handles NaNs, Normalization, Overlay)
-            cleanAndFormatImage<<<gridSize, blockSize, 0, stream>>>(
-                colors, overlay, d_finalOutput, w, h, currSample
-            );
+            if (postProcess) {
+                cleanFormatAndPostProcessImage<<<gridSize, blockSize, 0, stream>>>(
+                    colors, overlay, d_finalOutput, w, h, currSample, exposure, image.use_fitted_aces
+                );
+            } else {
+                cleanAndFormatImage<<<gridSize, blockSize, 0, stream>>>(
+                    colors, overlay, d_finalOutput, w, h, currSample
+                );
+            }
 
             // Copy the clean result to Host asynchronously
             cudaMemcpyAsync(h_finalOutput.data(), d_finalOutput, w * h * sizeof(float4), cudaMemcpyDeviceToHost, stream);
@@ -3583,6 +3620,7 @@ __host__ void launch_VCM(
     float4* __restrict__ colors,
     float4* __restrict__ overlay,
     bool postProcess,
+    float exposure,
     float mergeRadiusPower,
     float initialRadiusMultiplier
 )
@@ -3654,7 +3692,9 @@ __host__ void launch_VCM(
     auto lastSaveTime = std::chrono::steady_clock::now();
     int saveIntervalSamples = 200;
     Image image = Image(h_w, h_h);
-    image.postProcess = postProcess;
+    // Post-processing (exposure/tonemap/gamma) now happens on the GPU in
+    // cleanFormatAndPostProcessImage, so saveImageBMP() must not re-apply it.
+    image.postProcess = false;
     std::vector<float4> h_finalOutput(h_w * h_h);
 
     std::cout << "Begin Render" << std::endl;
@@ -3728,9 +3768,15 @@ __host__ void launch_VCM(
 
         if (currSample % saveIntervalSamples == 0 && DO_PROGRESSIVERENDER)
         {
-            cleanAndFormatImage<<<gridSize, blockSize>>>(
-                colors, overlay, d_finalOutput, h_w, h_h, currSample
-            );
+            if (postProcess) {
+                cleanFormatAndPostProcessImage<<<gridSize, blockSize>>>(
+                    colors, overlay, d_finalOutput, h_w, h_h, currSample, exposure, image.use_fitted_aces
+                );
+            } else {
+                cleanAndFormatImage<<<gridSize, blockSize>>>(
+                    colors, overlay, d_finalOutput, h_w, h_h, currSample
+                );
+            }
 
             cudaMemcpy(h_finalOutput.data(), d_finalOutput, h_w * h_h * sizeof(float4), cudaMemcpyDeviceToHost);
 
@@ -4204,6 +4250,7 @@ __host__ void launch_SPPM(
     float4* __restrict__ colors,
     float4* __restrict__ overlay,
     bool postProcess,
+    float exposure,
     float mergeRadiusPower,
     float initialRadiusMultiplier
 )
@@ -4272,7 +4319,9 @@ __host__ void launch_SPPM(
     auto lastSaveTime = std::chrono::steady_clock::now();
     int saveIntervalSamples = 30;
     Image image = Image(w, h);
-    image.postProcess = postProcess;
+    // Post-processing (exposure/tonemap/gamma) now happens on the GPU in
+    // cleanFormatAndPostProcessImage, so saveImageBMP() must not re-apply it.
+    image.postProcess = false;
     std::vector<float4> h_finalOutput(w * h);
 
     std::cout << "Begin Render with SPPM" << std::endl;
@@ -4343,9 +4392,15 @@ __host__ void launch_SPPM(
 
         if (currSample % saveIntervalSamples == 0 && DO_PROGRESSIVERENDER)
         {
-            cleanAndFormatImage<<<gridSize, blockSize>>>(
-                colors, overlay, d_finalOutput, w, h, currSample
-            );
+            if (postProcess) {
+                cleanFormatAndPostProcessImage<<<gridSize, blockSize>>>(
+                    colors, overlay, d_finalOutput, w, h, currSample, exposure, image.use_fitted_aces
+                );
+            } else {
+                cleanAndFormatImage<<<gridSize, blockSize>>>(
+                    colors, overlay, d_finalOutput, w, h, currSample
+                );
+            }
 
             cudaMemcpy(h_finalOutput.data(), d_finalOutput, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
 

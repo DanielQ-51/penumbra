@@ -742,7 +742,8 @@ __host__ void launch_simple_volume(
     float3 h_sceneCenter, float h_sceneRadius, float3 h_sceneMin,
     float4* __restrict__ colors,
     float4* __restrict__ overlay,
-    bool postProcess
+    bool postProcess,
+    float exposure
 )
 {
     cudaMemcpyToSymbol(sceneCenter, &(h_sceneCenter), sizeof(float3));
@@ -780,7 +781,9 @@ __host__ void launch_simple_volume(
     // Image Object (CPU) & Saving logic from SPPM
     int saveIntervalSamples = 300; // Matches SPPM logic
     Image image = Image(h_w, h_h);
-    image.postProcess = postProcess;
+    // Post-processing (exposure/tonemap/gamma) now happens on the GPU in
+    // cleanFormatAndPostProcessImage, so saveImageBMP() must not re-apply it.
+    image.postProcess = false;
     std::vector<float4> h_finalOutput(h_w * h_h);
 
     std::cout << "Running Kernels volume" << std::endl;
@@ -805,9 +808,15 @@ __host__ void launch_simple_volume(
         if ((currSample % saveIntervalSamples == 0 || currSample == numSample-1) && DO_PROGRESSIVERENDER)
         {
             // Launch the formatting kernel to handle averaging, NaNs, and Infs on the GPU
-            cleanAndFormatImage<<<gridSize, blockSize>>>(
-                colors, d_overlay, d_finalOutput, h_w, h_h, currSample
-            );
+            if (postProcess) {
+                cleanFormatAndPostProcessImage<<<gridSize, blockSize>>>(
+                    colors, d_overlay, d_finalOutput, h_w, h_h, currSample, exposure, image.use_fitted_aces
+                );
+            } else {
+                cleanAndFormatImage<<<gridSize, blockSize>>>(
+                    colors, d_overlay, d_finalOutput, h_w, h_h, currSample
+                );
+            }
 
             // Copy the finalized buffer back to the host
             cudaMemcpy(h_finalOutput.data(), d_finalOutput, h_w * h_h * sizeof(float4), cudaMemcpyDeviceToHost);

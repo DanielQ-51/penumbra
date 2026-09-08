@@ -39,8 +39,8 @@ extern "C" __global__ void __raygen__unidirectional() {
     for (int depth = 0; depth < params.max_depth; depth++)
     {   
         SurfaceHit hitData;
-
-        hitData = traceClosest(params, r);
+        optixReorder();
+        hitData = traceClosestNoSER(params, r);
         
         if (!hitData.isHit)
         {

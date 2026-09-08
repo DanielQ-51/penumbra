@@ -49,4 +49,14 @@ target_compile_options(NovumRender PRIVATE
 
 target_compile_options(NovumRender PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
 
-target_link_libraries(NovumRender PRIVATE CUDA::curand)
+# Fix the fatal LNK2019 errors by linking the CUDA Driver and Runtime
+target_link_libraries(NovumRender PRIVATE 
+    CUDA::curand 
+    CUDA::cuda_driver 
+    CUDA::cudart
+)
+
+# Fix the LNK4098 warning by ignoring the conflicting static C runtime library
+if(MSVC)
+    target_link_options(NovumRender PRIVATE /NODEFAULTLIB:LIBCMT)
+endif()

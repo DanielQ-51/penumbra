@@ -476,6 +476,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
 
         float3 lastPos;
         float3 lastNormal;
+        float3 lastGeoNormal; // geometric normal at x_{k-1}: ray spawns/offsets use this, not the shading normal
 
         // for x_k-1 emissive flag, when reconstructing rng at x_k-1
         uint32_t lastMaterialID_packedWithEmissiveFlag;
@@ -550,6 +551,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         lastBackface = backface;
         lastInDirLocal = incomingDirLocal;
         lastNormal = normal;
+        lastGeoNormal = geoNormal;
 #if USE_RAY_CONES
         lastConeWidth  = coneWidth;
         lastConeSpread = coneSpread + RAYCONE_ROUGHNESS_SPREAD * params.shadeContext.materials[materialID].roughness;
@@ -712,6 +714,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 lastBackface = backface;
                 lastInDirLocal = incomingDirLocal;
                 lastNormal = normal;
+                lastGeoNormal = geoNormal;
 
                 // change: moved break to this block so that the rng state handed to the shift
                 // helpers is as of arriving to x_k-1
@@ -828,6 +831,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
         float3 rc_xk_pos;
         bool rc_xk_backface;
         float3 rc_xk_normal;
+        float3 rc_xk_geoNormal; // like rc_xk_normal, left uninitialized for the k=d env case
 
         // Ray-cone LOD at the reconnection vertex x_k, propagating the prefix cone
         // (captured at x_{k-1}) across the reconnection segment. Computed from the
@@ -876,6 +880,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
                 rc_xk_materialID,
                 rc_xk_uv,
                 rc_xk_pos,
+                rc_xk_geoNormal,
                 rc_xk_normal,
                 rc_xk_backface,
 
@@ -884,6 +889,7 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             );
         }
 
+#if 0 // OLD 3-WAY DISPATCH -- superseded by perform_reconnection_unified below. Delete this line and the #endif to restore.
         if (K_less_D_minus_1(type)) {
             return perform_K_less_than_D_minus_1_reconnection(
                 params,
@@ -994,6 +1000,56 @@ __device__ __forceinline__ ShiftResult evaluateHybridShift(
             DEBUG_PRINTF("Alert: invalid path type with respect to k vs d, type is: %u, with seed %u and path length %u\n", type, seed, pathLength);
             return {false, f3(0), 0.0f, 0.0f};
         }
+#endif
+
+        // ---- UNIFIED DISPATCH ----------------------------------------------
+        // The three-way dispatch above is replaced by a single branch-merged helper.
+        // Params that are meaningless for a given case (rc_lod for k=d, cached_nee for
+        // k<d-1, ...) are still filled in; the helper selects/guards internally.
+        // Guard kept only for malformed types (both k-bits set), which the
+        // PATH_TYPE_* encodings never produce -- matches the old else branch.
+        if ((type & SHIFT_KREL_MASK) == SHIFT_KREL_MASK) {
+            DEBUG_PRINTF("Alert: invalid path type with respect to k vs d, type is: %u, with seed %u and path length %u\n", type, seed, pathLength);
+            return {false, f3(0), 0.0f, 0.0f};
+        }
+
+        return perform_reconnection_unified(
+            params,
+            localState,
+            type,
+            x, y,
+            isReverseShift,
+            (loopBound == 2), // xkminus1IsPrimary (x_k-1 is the primary hit)
+
+            // x_k parameters (from the rcPrimID getData block; uninitialized for k=d env)
+            rc_xk_materialID,         // rc_xk_materialID
+            rc_xk_uv,                 // rc_xk_uv
+            rc_xk_pos,                // rc_xk_pos
+            rc_xk_backface,           // rc_xk_backface
+            rc_xk_normal,             // rc_xk_normal
+            rc_xk_geoNormal,          // rc_xk_geoNormal
+
+            (lastMaterialID_packedWithEmissiveFlag & 0x80000000), // reinterpet the msb emissive flag as prevEmission
+
+            // x_{k-1} / y_{k-1} parameters (cached from the prefix loop)
+            (lastMaterialID_packedWithEmissiveFlag & 0x7FFFFFFF), // xkminus1_materialID (remove msb)
+            lastUV,                   // xkminus1_uv
+            lastPos,                  // xkminus1_pos
+            lastBackface,             // xkminus1_backface
+            lastNormal,               // xkminus1_normal
+            lastGeoNormal,            // xkminus1_geoNormal
+            lastInDirLocal,           // xkminus1_inDirLocal
+
+            // Ray/Path state
+            throughput,               // throughput entering x_k-1
+            rcWi,                     // x_k outgoing dir (k<d) / x_k-1 -> env dir (k=d env)
+            cached_nee,               // pdf_sampledLight_nee (unused for k<d-1)
+            rcRadiance,               // suffix radiance (k<d-1) or raw light emission (k>=d-1)
+            jacobianDenom,            // jacobian_denominator
+
+            lastLod,                  // xkminus1_lod (prefix cone LOD at x_{k-1})
+            rc_lod                    // rc_lod (reconnection-segment LOD at x_k; unused for k=d)
+        );
     }
 }
 

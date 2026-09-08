@@ -21,7 +21,9 @@ __host__ void launch_unidirectional(
     int numSample, 
     bool useMIS, 
     int w, int h, 
-    float4* __restrict__ colors
+    float4* __restrict__ colors, 
+    bool postProcess, 
+    float exposure
 );
 
 __host__ void launch_naive_unidirectional(
@@ -40,7 +42,9 @@ __host__ void launch_naive_unidirectional(
     int numSample, 
     bool useMIS, 
     int w, int h, 
-    float4* __restrict__ colors
+    float4* __restrict__ colors, 
+    bool postProcess, 
+    float exposure
 );
 
 __host__ void launch_bidirectional(
@@ -61,7 +65,8 @@ __host__ void launch_bidirectional(
     int lightNum, int numSample, int w, int h, 
     float3 h_sceneCenter, float h_sceneRadius, 
     float4* __restrict__ colors, float4* __restrict__ overlay, 
-    bool postProcess
+    bool postProcess, 
+    float exposure
 );
 
 __host__ void launch_VCM(
@@ -86,6 +91,7 @@ __host__ void launch_VCM(
     float4* __restrict__ colors, 
     float4* __restrict__ overlay, 
     bool postProcess, 
+    float exposure, 
     float mergeRadiusPower, 
     float initialRadiusMultiplier
 );
@@ -111,6 +117,7 @@ __host__ void launch_SPPM(
     float4* __restrict__ colors, 
     float4* __restrict__ overlay, 
     bool postProcess, 
+    float exposure, 
     float mergeRadiusPower, 
     float initialRadiusMultiplier
 );

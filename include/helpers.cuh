@@ -493,6 +493,7 @@ __device__ __forceinline__ void getDataWithoutInDirectionAndEmission(
     int& materialID,
     float2& uv,
     float3& shadingPos,
+    float3& geoNormal,
     float3& normal,
     bool& backface,
 
@@ -511,6 +512,7 @@ __device__ __forceinline__ void getDataWithoutInDirectionAndEmission(
 
     shadingPos = (1.0f - u - v) * apos + u * bpos + v * cpos;
 
+    float3 gnObj = cross(bpos - apos, cpos - apos); // object-space geometric normal
     normal = interpolateNormal(tri, shadeContext, u, v, apos, bpos, cpos);
 
     // Transform to world space before the backface test: `origin` is already a world
@@ -519,13 +521,20 @@ __device__ __forceinline__ void getDataWithoutInDirectionAndEmission(
     if (instanceID != 0xFFFFFFFF) {
         shadingPos = transformPosition(shadeContext.transformationMatrices, instanceID, shadingPos);
         normal = transformNormalRigid(shadeContext.transformationMatrices, instanceID, normal);
+        geoNormal = transformNormalRigid(shadeContext.transformationMatrices, instanceID, gnObj);
+    } else {
+        geoNormal = normalize(gnObj);
     }
+
+    // Side-align the geometric normal with the interpolated one BEFORE normal mapping,
+    // exactly as getDataGeoLOD does, so both functions agree on which side is "front".
+    if (dot(geoNormal, normal) < 0.0f) geoNormal = -geoNormal;
 
     normal = applyNormalMap(tri, shadeContext, materialID, apos, bpos, cpos, uv, normal, instanceID, lod);
 
     float3 inDirection = normalize(shadingPos - origin);
     backface = dot(normal, inDirection) > 0.0f;
-    normal = backface ? -normal : normal;
+    if (backface) { normal = -normal; geoNormal = -geoNormal; }
 }
 
 inline void readObjSimple(

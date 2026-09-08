@@ -825,7 +825,8 @@ __host__ void launch_wavefrontUnidirectional(
     float3 h_sceneCenter, float h_sceneRadius, float3 h_sceneMin,
     float4* __restrict__ colors,
     float4* __restrict__ overlay,
-    bool postProcess
+    bool postProcess,
+    float exposure
 )
 {
     runDataStructureTests();
@@ -911,7 +912,9 @@ __host__ void launch_wavefrontUnidirectional(
     auto lastSaveTime = std::chrono::steady_clock::now();
     int saveIntervalSamples = 20000;
     Image image = Image(h_w, h_h);
-    image.postProcess = postProcess;
+    // Post-processing (exposure/tonemap/gamma) now happens on the GPU in
+    // cleanFormatAndPostProcessImage, so saveImageBMP() must not re-apply it.
+    image.postProcess = false;
     std::vector<float4> h_finalOutput(h_w * h_h);
 
     std::cout << "Begin Render" << std::endl;
@@ -1056,9 +1059,15 @@ __host__ void launch_wavefrontUnidirectional(
 
         if ((currSample % saveIntervalSamples == 0 || currSample == numSample-1) && DO_PROGRESSIVERENDER)
         {
-            cleanAndFormatImage<<<gridSize, blockSize>>>(
-                colors, overlay, d_finalOutput, h_w, h_h, currSample
-            );
+            if (postProcess) {
+                cleanFormatAndPostProcessImage<<<gridSize, blockSize>>>(
+                    colors, overlay, d_finalOutput, h_w, h_h, currSample, exposure, image.use_fitted_aces
+                );
+            } else {
+                cleanAndFormatImage<<<gridSize, blockSize>>>(
+                    colors, overlay, d_finalOutput, h_w, h_h, currSample
+                );
+            }
 
             cudaMemcpy(h_finalOutput.data(), d_finalOutput, h_w * h_h * sizeof(float4), cudaMemcpyDeviceToHost);
 

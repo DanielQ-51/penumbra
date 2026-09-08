@@ -167,7 +167,7 @@ __host__ void renderFrameRestir(
     optixLaunch(engineState.pipeline, stream, d_params, sizeof(PipelineParams),
                 &engineState.sbt_restirCandidate, w, h, 1);
 
-    computeDualMV<<<gridSize, blockSize, 0, stream>>>(allParams.restir.gbuffer, w, h);
+    computeDualMV<<<gridSize, blockSize, 0, stream>>>(allParams.restir.gbuffer, allParams.restir.prevGbuffer, w, h);
 
 #if USE_DUPLICATION_MAP
     computeDuplicationMapKernel<<<gridSize, blockSize, 0, stream>>>(
@@ -222,8 +222,10 @@ __host__ void launch_restir (
     uint32_t frameCount,
     const RenderConfig& config
 ) {
+    commonParams.camera.antiAliasJitterDist = 0.0f;
     PipelineParams allParams = {};
     allParams.common = commonParams;
+
     
     RestirState state;
     setupRestirState(commonParams, state, allParams);
@@ -299,7 +301,7 @@ __host__ void launch_restir (
 #else
     //TurntableCameraAnimation animation = TurntableCameraAnimation(f3(0.0f, 0.0f, -1.5f), 6.5f, -0.36f, 90.0f, 0.0f);
 #endif
-    //LinearCameraAnimation animation = LinearCameraAnimation(commonParams.camera.cameraOrigin, f3(commonParams.camera.xRot, commonParams.camera.yRot, commonParams.camera.zRot), f3(0.00f, 0.02f, 0.0f) ,f3());
+    LinearCameraAnimation animation = LinearCameraAnimation(commonParams.camera.cameraOrigin, f3(commonParams.camera.xRot, commonParams.camera.yRot, commonParams.camera.zRot), f3(0, 0.00f, 3.00f / 30.0f) ,f3());
     
 
     float3 startOrigin = make_float3(commonParams.camera.cameraOrigin.x, 1.59222f, commonParams.camera.cameraOrigin.z);
@@ -310,7 +312,7 @@ __host__ void launch_restir (
     float3 rotDelta = make_float3(-0.001118f, 0.00f, 0.00f);
 
     
-    LinearCameraAnimation animation = LinearCameraAnimation(
+    LinearCameraAnimation animation1 = LinearCameraAnimation(
         startOrigin,
         startRotation,
         posDelta,

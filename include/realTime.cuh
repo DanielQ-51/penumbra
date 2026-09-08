@@ -10,5 +10,6 @@ __host__ void launch_simple_volume(
     float4 h_sceneCenter, float h_sceneRadius, float4 h_sceneMin, 
     float4* __restrict__ colors, 
     float4* __restrict__ overlay, 
-    bool postProcess
+    bool postProcess, 
+    float exposure
 );

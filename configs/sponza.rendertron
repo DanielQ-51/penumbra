@@ -2,23 +2,27 @@ Name: sponza
 
 MaterialsFile: configs/materials.rendertron
 
-EnvMap: assets/environment/sunflowers_puresky_1k.exr
+EnvMap: assets/environment/sunflowers_puresky_4k.exr
+EnvMap: assets/environment/black.exr
 EnvMap Rotation: 130.0
-
-width: 4096
-height: 1716
 
 width: 1920
 height: 1080
 
-Exposure: 2.0
+Exposure: 4.0
 
 Integrator: RESTIRPT
-Sample Count: 1000
+
+
+Sample Count: 2000
 Post Process: true
 
-Unidirectional Max Depth: 12
+Unidirectional Max Depth: 20
 BVH recommended leaf size: 2
+
+Camera Position: -11.1519 1.62718 0.0724823
+Camera Rotation: 6.41695 -270.572 0
+Camera FOV: 50
 
 Pinhole Camera: true
 Camera Position: -7.40743 1.59222 -0.858258
@@ -27,12 +31,20 @@ Camera Apeture: 0.0
 Camera FocalDist: 0.0
 Camera FOV: 50.0
 
+Camera Position: 15.8482 0.87021 -2.42764
+Camera Rotation: 2.26309 -258.683 0
+Camera FOV: 50
+
+Camera Position: -4.40212 1.11245 -0.0185026
+Camera Rotation: 1.40364 107.151 0
+Camera FOV: 55.0
+
 Meshes (path; multiplier * emission; materialID):
-assets/scenedata/sponzaglass.obj; 0.0 * (0.0, 0.0, 0.0); 5
+.assets/scenedata/sponzaglass.obj; 0.0 * (0.0, 0.0, 0.0); 5
 
 GLTFs (path; maxTextureDim; emissionScale):
-assets/gltf/sponza_no_door/sponza_no_door.gltf; 2048; 1.0
+assets/gltf/sponza_no_door/sponza_no_door.gltf; 4096; 0.0
 .assets/gltf/pkg_a_curtains/NewSponza_Curtains_glTF.gltf; 4096; 100.0
 .assets/gltf/pkg_d_10k_candles/NewSponza_4_Combined_glTF.gltf; 256; 30.0
-.assets/gltf/sponza_lights/sponzalights.gltf; 512; 100.0
+assets/gltf/sponza_lights/sponzalights.gltf; 512; 100.0
 

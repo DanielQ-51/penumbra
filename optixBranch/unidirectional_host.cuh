@@ -37,7 +37,7 @@ __host__ void launch_unidirectional(
 
     PipelineParams allParams = {};
     allParams.common = commonParams;
-    allParams.common.camera.antiAliasJitterDist = 1.0f;
+    //allParams.common.camera.antiAliasJitterDist = 1.0f;
 
     CUdeviceptr d_params;
     cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(PipelineParams));

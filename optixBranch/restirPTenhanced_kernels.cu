@@ -12,10 +12,6 @@
 #include "settings.cuh"
 
 
-#ifndef DUALMV_SEARCH_RADIUS
-#define DUALMV_SEARCH_RADIUS 2
-#endif
-
 #ifndef DUPE_MAP_SEARCH_RADIUS
 #define DUPE_MAP_SEARCH_RADIUS 8
 #endif
@@ -24,8 +20,23 @@
 #define DUPE_MAP_SEARCH_STRIDE 1
 #endif
 
+// Dual motion vectors for occlusions, after Zeng et al. 2021, "Temporally Reliable
+// Motion Vectors for Real-time Ray Tracing", Eqn. 6:
+//
+//     x^O_{i-1} = y + (x_i - z),   y = back-project(x_i),   z = forward-project(y)
+//
+// z - y is the occluder's screen displacement, so the expression collapses to
+// x_i - mv_occluder: reproject by the OCCLUDER's motion rather than our own, where
+// the occluder is whatever occupied x_i's traditional back-projection last frame.
+// The y/z round trip exists only to identify which surface that is.
+//
+// The paper obtains z by applying the occluder's object transform T. We instead read
+// the occluder's own stored motion vector out of the previous frame's gbuffer, which
+// covers [i-2, i-1] rather than [i-1, i] -- a constant-velocity approximation. Exact
+// T would require a per-pixel instance id in the gbuffer.
 __global__ void computeDualMV(
     GBuffer gbuffer,
+    GBuffer prevGbuffer,
     uint32_t w,
     uint32_t h
 ) {
@@ -35,37 +46,31 @@ __global__ void computeDualMV(
 
     int center_idx = y * w + x;
 
-    // 0xFFFFFFFF MV = environment miss: candidate gen never wrote depth for that pixel,
-    // so its depth is meaningless (garbage/stale). Treat such pixels as infinitely far
-    // so they can never win the closest-depth test below; otherwise their undefined
-    // depth drives a nondeterministic MV steal.
-    auto validDepth = [&](int idx) -> float {
-        half2 mv = gbuffer.getMV_notstreaming(idx);
-        if (reinterpret_cast<const uint32_t&>(mv) == 0xFFFFFFFFu) return 1e30f;
-        return gbuffer.getDepth_notstreaming(idx);
-    };
+    half2 self_mv = gbuffer.getMV_notstreaming(center_idx);
 
-    float closest_depth = validDepth(center_idx);
-    half2 best_dual_mv = gbuffer.getMV_notstreaming(center_idx);
+    // The dual slot must always decode to a finite half2: the temporal forward pass
+    // feeds it straight into roundf(). Defaulting to this pixel's own motion vector
+    // means an unresolvable occluder lookup can never plant a NaN there.
+    half2 dual_mv = self_mv;
 
-    for (int dy = -DUALMV_SEARCH_RADIUS; dy <= DUALMV_SEARCH_RADIUS; dy++) {
-        for (int dx = -DUALMV_SEARCH_RADIUS; dx <= DUALMV_SEARCH_RADIUS; dx++) {
+    // 0xFFFFFFFF = env miss, no reprojectable surface. Temporal never reads the dual
+    // slot for those pixels, so propagating the sentinel is correct.
+    if (reinterpret_cast<const uint32_t&>(self_mv) != 0xFFFFFFFFu) {
+        // y in Eqn. 6.
+        int back_x = x - (int)roundf(__half2float(self_mv.x));
+        int back_y = y - (int)roundf(__half2float(self_mv.y));
 
-            int nx = clamp(x + dx, 0, w - 1);
-            int ny = clamp(y + dy, 0, h - 1);
-            int neighbor_idx = ny * w + nx;
-
-            float neighbor_depth = validDepth(neighbor_idx);
-
-            // If neighbor is significantly closer to the camera, steal its MV
-            if (neighbor_depth < closest_depth) {
-                closest_depth = neighbor_depth;
-                best_dual_mv = gbuffer.getMV_notstreaming(neighbor_idx);
-            }
+        if (back_x >= 0 && back_x < (int)w && back_y >= 0 && back_y < (int)h) {
+            half2 occ_mv = prevGbuffer.getMV_notstreaming(back_y * w + back_x);
+            float ox = __half2float(occ_mv.x);
+            float oy = __half2float(occ_mv.y);
+            // isfinite also rejects the 0xFFFFFFFF sentinel, which decodes to NaN,
+            // and any garbage half pattern in an unwritten history pixel.
+            if (isfinite(ox) && isfinite(oy)) dual_mv = occ_mv;
         }
     }
 
-    gbuffer.setDualMotionVec(center_idx, best_dual_mv);
+    gbuffer.setDualMotionVec(center_idx, dual_mv);
 }
 
 __global__ void computeDuplicationMapKernel(

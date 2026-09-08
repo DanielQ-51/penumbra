@@ -82,7 +82,9 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
     camera.preCompute();
 
     Image image = Image(w, h);
-    image.postProcess = config.postProcess;
+    // Post-processing (exposure/tonemap/gamma) now happens on the GPU in
+    // cleanFormatAndPostProcessImage, so saveImageBMP() must not re-apply it.
+    image.postProcess = false;
 
     if (integratorChoice == UNIDIRECTIONAL)
     {
@@ -368,7 +370,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
 
     
     if (integratorChoice == UNIDIRECTIONAL)
-        launch_unidirectional(maxDepth, camera, mats_d, texView, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightNum, sampleCount, true, w, h, out_colors);
+        launch_unidirectional(maxDepth, camera, mats_d, texView, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightNum, sampleCount, true, w, h, out_colors, config.postProcess, config.exposure);
     else if (integratorChoice == BIDIRECTIONAL)
     {
         int totalEyePathVertices = w * h * eyePathDepth;
@@ -446,7 +448,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
 
         launch_bidirectional(eyePathDepth, lightPathDepth, camera, eyePath_d, lightPath_d, mats_d, texView, BVH, 
             BVHindices, verts, points.size(), scene, mesh.size(), lights, lightNum, sampleCount, w, h, 
-            sceneCenter, sceneRadius, out_colors, out_overlay, config.postProcess);
+            sceneCenter, sceneRadius, out_colors, out_overlay, config.postProcess, config.exposure);
         cudaFree(eyePath_d);
         cudaFree(lightPath_d);
 
@@ -480,7 +482,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
     }
     else if (integratorChoice == NAIVE_UNIDIRECTIONAL)
     {
-        launch_naive_unidirectional(maxDepth, camera, mats_d, texView, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightNum, sampleCount, true, w, h, out_colors);
+        launch_naive_unidirectional(maxDepth, camera, mats_d, texView, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightNum, sampleCount, true, w, h, out_colors, config.postProcess, config.exposure);
     }
     else if (integratorChoice == SPPM)
     {
@@ -532,7 +534,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
             w, h, 
             sceneCenter, sceneRadius, sceneMin,
             out_colors, out_overlay,
-            config.postProcess, VCMMergeConstant, VCMInitialMergeRadiusMultiplier
+            config.postProcess, config.exposure, VCMMergeConstant, VCMInitialMergeRadiusMultiplier
         );
 
 
@@ -669,7 +671,7 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
             w, h, 
             sceneCenter, sceneRadius, sceneMin,
             out_colors, out_overlay,
-            config.postProcess, VCMMergeConstant, VCMInitialMergeRadiusMultiplier
+            config.postProcess, config.exposure, VCMMergeConstant, VCMInitialMergeRadiusMultiplier
         );
 
         //cudaFree(lightPath_d);
@@ -739,7 +741,8 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
             w, h,
             sceneCenter, sceneRadius, sceneMin,
             out_colors, out_overlay,
-            config.postProcess
+            config.postProcess,
+            config.exposure
         );
     } else if (integratorChoice == VOLUME_SIMPLE) {
         SceneContext sc;
@@ -765,7 +768,8 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
             w, h,
             sceneCenter, sceneRadius, sceneMin,
             out_colors, out_overlay,
-            config.postProcess
+            config.postProcess,
+            config.exposure
         );
     }
     
@@ -774,40 +778,39 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
     // Launch GPU Code - goes to functions in deviceCode.cu
     //---------------------------------------------------------------------------------------------------------------------------------------------------
 
+    // Averaging, NaN/Inf sanitizing, overlay compositing and post-processing all
+    // happen in the one formatting kernel, matching the OptiX branch. The kernel is
+    // element-wise (reads and writes the same pixel index), so out_colors can serve
+    // as both input and output.
+    {
+        dim3 blockSize(16, 16);
+        dim3 gridSize((w + 15) / 16, (h + 15) / 16);
+
+        // Divisor is currentSampleCount + 1, so pass sampleCount - 1 to divide by sampleCount.
+        if (config.postProcess) {
+            cleanFormatAndPostProcessImage<<<gridSize, blockSize>>>(
+                out_colors, out_overlay, out_colors, w, h, sampleCount - 1,
+                config.exposure, image.use_fitted_aces
+            );
+        } else {
+            cleanAndFormatImage<<<gridSize, blockSize>>>(
+                out_colors, out_overlay, out_colors, w, h, sampleCount - 1
+            );
+        }
+        cudaDeviceSynchronize();
+    }
+
     float4* host_colors = new float4[w * h];
     cudaMemcpy(host_colors, out_colors, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
-
-    float4* host_overlay = new float4[w * h];
-    cudaMemcpy(host_overlay, out_overlay, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
-
-    for (int i = 0; i < w * h; i++)
-    {
-        host_colors[i] /= (float)sampleCount;
-
-        if (isnan(host_colors[i].x) || isnan(host_colors[i].y) || isnan(host_colors[i].z)) {
-            host_colors[i] = f4(1.0f, 0.0f, 1.0f); // Bright Pink for NaN
-        }
-        if (isinf(host_colors[i].x) || isinf(host_colors[i].y) || isinf(host_colors[i].z)) {
-            host_colors[i] = f4(0.0f, 1.0f, 0.0f); // Bright Green for Inf
-        }
-    }
 
     for (int i = 0; i < w; i++)
     {
         for (int j = 0; j < h; j++)
         {
-            
-            if (host_colors[image.toIndex(i, j)].x < 0 || host_colors[image.toIndex(i, j)].y < 0 || host_colors[image.toIndex(i, j)].z < 0)
-                cout << i << ", " << j << " Negative color written: <" << host_colors[image.toIndex(i, j)].x << ", " << host_colors[image.toIndex(i, j)].y << ", " 
-                    << host_colors[image.toIndex(i, j)].z << ">"<< endl;
-
-            if (host_overlay[image.toIndex(i, j)].x == 0 && host_overlay[image.toIndex(i, j)].y == 0 && host_overlay[image.toIndex(i, j)].z == 0)
-                image.setColor(i, j, host_colors[image.toIndex(i, j)]);
-            else
-                image.setColor(i, j, host_overlay[image.toIndex(i, j)]);
+            image.setColor(i, j, host_colors[image.toIndex(i, j)]);
         }
     }
-    
+
     // memory freeing
     cudaFree(out_colors);
     cudaFree(out_overlay);
@@ -823,7 +826,6 @@ int initRender(string configPath, int renderNumber, string animatedObjPath = "in
     if (d_volumes) cudaFree(d_volumes);
 
     delete[] host_colors;
-    delete[] host_overlay;
 
     std::string filename = std::string(ROOT_DIR) + "/renders/glove/" + config.name + "" + std::to_string(renderNumber) + ".bmp";
     image.saveImageBMP(filename);

@@ -4,6 +4,7 @@
 
 __global__ void computeDualMV(
     GBuffer gbuffer,
+    GBuffer prevGbuffer,
     uint32_t w,
     uint32_t h
 );

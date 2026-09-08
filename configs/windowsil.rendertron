@@ -8,11 +8,8 @@ EnvMap Rotation: 130.0
 width: 6884
 height: 2880
 
-width: 688
-height: 288
-
 Integrator: UNIDIRECTIONAL
-Sample Count: 100000
+Sample Count: 2000
 Post Process: true
 
 Unidirectional Max Depth: 12
